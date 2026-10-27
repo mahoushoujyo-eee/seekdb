@@ -28,10 +28,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LD_LIBRARY_PATH=/opt/seekdb/lib
 
 RUN apt-get update -yq && \
+    (apt-get install -yq --no-install-recommends libaio1 || \
+     apt-get install -yq --no-install-recommends libaio1t64) && \
     apt-get install -yq --no-install-recommends \
       ca-certificates \
       curl \
-      libaio1 \
       libnuma1 \
       locales \
       python3 \
