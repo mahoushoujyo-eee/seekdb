@@ -13,7 +13,10 @@
 # The tree cannot be taken from build/bin directly, that path is a symlink into
 # the bazel output base and a build context does not follow symlinks.
 
-FROM ubuntu:22.04
+# The image runs the binary that was built on the host, both have to be the
+# same distribution, the binary needs the glibc of the distribution it was
+# built on.
+FROM ubuntu:24.04
 
 LABEL org.opencontainers.image.title="seekdb" \
       org.opencontainers.image.description="SeekDB, the AI native database" \
@@ -30,7 +33,6 @@ RUN apt-get update -yq && \
       curl \
       libaio1 \
       libnuma1 \
-      libtinfo5 \
       locales \
       python3 \
       tzdata && \
