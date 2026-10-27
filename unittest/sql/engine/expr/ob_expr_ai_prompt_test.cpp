@@ -15,6 +15,9 @@
  */
 
 #include <gtest/gtest.h>
+#include <cstring>
+#include <string>
+#include <vector>
 #include "sql/engine/expr/ob_expr_ai/ob_ai_func_utils.h"
 
 namespace oceanbase
