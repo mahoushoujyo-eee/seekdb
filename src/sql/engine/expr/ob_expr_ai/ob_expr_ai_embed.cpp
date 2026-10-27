@@ -148,7 +148,7 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr, ObEvalCtx &ctx,
   } else {
     ObEvalCtx::BatchInfoScopeGuard batch_info_guard(ctx);
     batch_info_guard.set_batch_size(size);
-    ObDatumVector res_datum = expr.locate_expr_datumvector(ctx);
+    ObDatum *res_datums = expr.locate_batch_datums(ctx);
     ObBitVector &eval_flags = expr.get_evaluated_flags(ctx);
     ObDatum *model_datums = model_expr->is_batch_result() ? model_expr->locate_batch_datums(ctx) : nullptr;
     ObDatum *content_datums = content_expr->is_batch_result() ? content_expr->locate_batch_datums(ctx) : nullptr;
@@ -177,7 +177,7 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr, ObEvalCtx &ctx,
           || model_datum->is_null() || content_datum->is_null()) {
         // A null model id or a null content has no embedding, the null is
         // propagated to the result.
-        res_datum.at(i)->set_null();
+        res_datums[i].set_null();
         eval_flags.set(i);
         expr.get_eval_info(ctx).notnull_ = false;
         continue;
@@ -185,7 +185,7 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr, ObEvalCtx &ctx,
       ObString row_model_id = model_datum->get_string();
       ObString row_content = content_datum->get_string();
       if (row_model_id.empty() || row_content.empty()) {
-        res_datum.at(i)->set_null();
+        res_datums[i].set_null();
         eval_flags.set(i);
         expr.get_eval_info(ctx).notnull_ = false;
         continue;
@@ -253,7 +253,8 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr, ObEvalCtx &ctx,
         } else {
           // Give every row the embedding that belongs to its own input.
           for (int64_t i = 0; OB_SUCC(ret) && i < row_indexes.count(); i++) {
-            if (OB_FAIL(ObAIFuncUtils::set_string_result(expr, ctx, *res_datum.at(row_indexes[i]), results[i]))) {
+            batch_info_guard.set_batch_idx(row_indexes[i]);
+            if (OB_FAIL(ObAIFuncUtils::set_string_result(expr, ctx, res_datums[row_indexes[i]], results[i]))) {
             } else {
               eval_flags.set(row_indexes[i]);
             }
