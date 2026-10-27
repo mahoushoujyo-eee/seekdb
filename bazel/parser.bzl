@@ -59,16 +59,23 @@ def _parser_impl(ctx):
     lexer = ctx.outputs.lexer
     if ctx.attr.lexer_patch:
         lexer = ctx.actions.declare_file(ctx.label.name + "/" + lexer.basename)
+    # Flex runs m4 as its macro processor and looks for it in the PATH of the
+    # action. Tell it where m4 is, the same way the bison action above does,
+    # so that a host without m4 in its default PATH still builds the parsers.
+    flex_environment = {}
+    if ctx.files._m4:
+        flex_environment["M4"] = ctx.files._m4[0].path
     ctx.actions.run(
         executable = ctx.file._flex,
         inputs = [ctx.file.lexer_source],
-        tools = ctx.files._runtime,
+        tools = ctx.files._runtime + ctx.files._m4,
         outputs = [lexer, ctx.outputs.lexer_header],
         arguments = ctx.attr.flex_options + [
             "--header-file=" + ctx.outputs.lexer_header.path,
             "--outfile=" + lexer.path,
             ctx.file.lexer_source.path,
         ],
+        env = flex_environment,
         mnemonic = "Flex",
     )
     if ctx.attr.lexer_patch:
