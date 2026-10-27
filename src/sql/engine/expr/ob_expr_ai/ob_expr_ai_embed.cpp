@@ -170,9 +170,9 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr, ObEvalCtx &ctx,
         eval_flags.set(i);
         continue;
       }
-      const ObDatum *model_datum = OB_NOTNULL(model_datums) ? &model_datums[i] : const_model;
-      const ObDatum *content_datum = OB_NOTNULL(content_datums) ? &content_datums[i] : const_content;
-      const ObDatum *dim_datum = OB_NOTNULL(dim_datums) ? &dim_datums[i] : const_dim;
+      const ObDatum *model_datum = OB_NOT_NULL(model_datums) ? &model_datums[i] : const_model;
+      const ObDatum *content_datum = OB_NOT_NULL(content_datums) ? &content_datums[i] : const_content;
+      const ObDatum *dim_datum = OB_NOT_NULL(dim_datums) ? &dim_datums[i] : const_dim;
       if (OB_ISNULL(model_datum) || OB_ISNULL(content_datum)
           || model_datum->is_null() || content_datum->is_null()) {
         // A null model id or a null content has no embedding, the null is
@@ -198,7 +198,7 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr, ObEvalCtx &ctx,
         need_row_by_row = true;
         break;
       }
-      if (OB_NOTNULL(dim_datum)) {
+      if (OB_NOT_NULL(dim_datum)) {
         if (dim_datum->is_null() || dim_datum->get_int() <= 0) {
           ret = OB_INVALID_ARGUMENT;
           LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, dimension parameter must be a positive integer");
