@@ -7,9 +7,11 @@ connection default;
 # 正确
 select ai_prompt('{0}+{1}={2} 吗？请回答true或false','1');
 
-# not support
---error 1235 
+# a json object is one argument
 select ai_prompt('{0}+{1}={2} 吗？请回答true或false',json_object("a","1"));
+
+# a json array is one argument
+select ai_prompt('{0}',json_array("a","b"));
 
 
 # 无参数
@@ -23,13 +25,14 @@ select ai_prompt(1);
 --error 5083
 select ai_prompt(1.2);
 
---error 5083
+# the template may be a json object, but it has to be a prompt object
+--error 1210
 select ai_prompt(json_object("a","1"));
 
 --error 5083
 select ai_prompt('{0}+{1}={2} 吗？请回答true或false',1);
 
-# 表达式支持类型  支持任意数量的输入，要求都是varchar长度内的字符串，不支持其他类型，不允许输入null
+# 表达式支持类型  支持任意数量的输入，要求是字符串或json值，不支持其他类型，不允许输入null
 # test  
 --disable_warnings
 drop table if exists t1;
@@ -48,7 +51,7 @@ select ai_prompt(c) from t1;
 drop table t1;
 
 
-# 表达式不支持的类型 
+# 表达式支持的类型
 # test  text/blob
 --disable_warnings
 drop table if exists t1;
@@ -64,11 +67,9 @@ insert into t1 values(7, 'AA', 'bb', 'CC', 'dd');
 select ai_prompt(nr) from t1;
 --error 5083
 select ai_prompt(a) from t1;
---error 5083
 select ai_prompt(b) from t1;
 --error 5083
 select ai_prompt(c) from t1;
---error 5083
 select ai_prompt(d) from t1;
 
 drop table t1;

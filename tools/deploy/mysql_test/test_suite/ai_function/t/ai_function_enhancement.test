@@ -1,0 +1,189 @@
+#owner: mahoushoujyo-eee
+#owner group: shenzhen
+
+### The test needs the mock ai service on 0.0.0.0:8000, see
+### tools/deploy/mysql_test/test_suite/ai_function/mock_ai_service.py
+
+### root
+connection default;
+
+--disable_warnings
+drop table if exists t_ai_prompt;
+drop table if exists t_ai_embed;
+drop table if exists t_ai_rerank;
+--enable_warnings
+
+### the models the test uses
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_complete_model');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_embed_model');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_rerank_model');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_ollama_model');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_ollama_embed_model');
+
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('mock_complete_model', '{
+    "type": "completion",
+    "model_name": "mock-model"
+  }');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('mock_embed_model', '{
+    "type": "dense_embedding",
+    "model_name": "mock-embed-model"
+  }');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('mock_rerank_model', '{
+    "type": "rerank",
+    "model_name": "mock-rerank-model"
+  }');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('mock_ollama_model', '{
+    "type": "completion",
+    "model_name": "mock-ollama-model"
+  }');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('mock_ollama_embed_model', '{
+    "type": "dense_embedding",
+    "model_name": "mock-ollama-embed-model"
+  }');
+
+### the endpoints the test uses
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_complete_endpoint');
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_embed_endpoint');
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_rerank_endpoint');
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_ollama_endpoint');
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_ollama_embed_endpoint');
+
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('mock_complete_endpoint', '{
+    "ai_model_name": "mock_complete_model",
+    "url": "http://127.0.0.1:8000/v1/chat/completions",
+    "access_key": "sk-mock-key",
+    "request_model_name": "mock-model",
+    "provider": "openai"
+  }');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('mock_embed_endpoint', '{
+    "ai_model_name": "mock_embed_model",
+    "url": "http://127.0.0.1:8000/v1/embeddings",
+    "access_key": "sk-mock-key",
+    "request_model_name": "mock-embed-model",
+    "provider": "openai"
+  }');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('mock_rerank_endpoint', '{
+    "ai_model_name": "mock_rerank_model",
+    "url": "http://127.0.0.1:8000/v1/rerank",
+    "access_key": "sk-mock-key",
+    "request_model_name": "mock-rerank-model",
+    "provider": "siliconflow"
+  }');
+
+### an ollama endpoint needs no access key
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('mock_ollama_endpoint', '{
+    "ai_model_name": "mock_ollama_model",
+    "url": "http://127.0.0.1:8000/api/generate",
+    "request_model_name": "mock-ollama-model",
+    "provider": "ollama"
+  }');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('mock_ollama_embed_endpoint', '{
+    "ai_model_name": "mock_ollama_embed_model",
+    "url": "http://127.0.0.1:8000/api/embed",
+    "request_model_name": "mock-ollama-embed-model",
+    "provider": "OLLAMA"
+  }');
+
+### the provider of an endpoint may be changed, the name is not case sensitive
+call DBMS_AI_SERVICE.ALTER_AI_MODEL_ENDPOINT('mock_ollama_endpoint', '{
+    "provider" : "Ollama"
+  }');
+select ENDPOINT_NAME, AI_MODEL_NAME, PROVIDER from oceanbase.DBA_OB_AI_MODEL_ENDPOINTS where ENDPOINT_NAME = 'mock_ollama_endpoint';
+
+### ai_prompt: a json argument, a repeated placeholder and a nested prompt
+select ai_prompt('{0} and {0}', 'x');
+select ai_prompt('{0} and {1}', 'x', 'y');
+select ai_prompt('{0}', json_object('k', 'v'));
+select ai_prompt('{0}', json_array('a', 'b'));
+select ai_prompt(ai_prompt('{0} {1}', 'a'), 'b');
+select ai_prompt('no placeholder here');
+
+### ai_prompt: a text and a longtext template
+create table t_ai_prompt (id int primary key, t text, lt longtext);
+insert into t_ai_prompt values (1, 'hello {0}', 'world {0}');
+select id, ai_prompt(t, 'x') from t_ai_prompt order by id;
+select id, ai_prompt(lt, 'x') from t_ai_prompt order by id;
+drop table t_ai_prompt;
+
+### ai_prompt: an illegal placeholder index is an error
+--error 1210
+select ai_prompt('{5}', 'x');
+
+### ai_complete: the openai protocol, a json config and a null config
+select ai_complete('mock_complete_model', 'hello');
+select ai_complete('mock_complete_model', 'hello', '{"temperature": 0.5, "max_tokens": 128}');
+select ai_complete('mock_complete_model', 'hello', null);
+select ai_complete('mock_complete_model', ai_prompt('{0}', 'world'));
+
+### ai_complete: the native ollama protocol
+select ai_complete('mock_ollama_model', 'hello');
+
+### ai_embed: the default dimension and an explicit dimension
+select ai_embed('mock_embed_model', 'hello');
+select ai_embed('mock_embed_model', 'hello', 4);
+select ai_embed('mock_ollama_embed_model', 'hello');
+
+### ai_embed: a dimension that does not match the answer is an error
+--error 1210
+select ai_embed('mock_embed_model', 'hello', 3);
+### ai_embed: a dimension has to be a positive integer
+--error 1210
+select ai_embed('mock_embed_model', 'hello', 0);
+--error 1210
+select ai_embed('mock_embed_model', 'hello', -1);
+
+### ai_embed: a whole table is asked with one request, every row keeps its own answer
+create table t_ai_embed (id int primary key, content varchar(64));
+insert into t_ai_embed values (1, 'alpha'), (2, 'beta'), (3, 'gamma');
+select id, ai_embed('mock_embed_model', content) from t_ai_embed order by id;
+
+### ai_embed: a null content has no embedding, the null is propagated
+insert into t_ai_embed values (4, null);
+select id, ai_embed('mock_embed_model', content) from t_ai_embed order by id;
+
+### ai_embed: a filter and a limit do not move the answers
+select id, ai_embed('mock_embed_model', content) from t_ai_embed where id > 1 order by id;
+select id, ai_embed('mock_embed_model', content) from t_ai_embed order by id limit 2;
+drop table t_ai_embed;
+
+### ai_rerank: a list of strings
+select ai_rerank('mock_rerank_model', 'apple', json_array('apple pie', 'banana split', 'apple juice'));
+
+### ai_rerank: a list of objects, the text is taken from the given field
+select ai_rerank('mock_rerank_model', 'apple',
+                 json_array(json_object('id', 1, 'text', 'apple pie'),
+                            json_object('id', 2, 'text', 'banana split'),
+                            json_object('id', 3, 'text', 'apple juice')),
+                 'text');
+
+### ai_rerank: more documents than fit into one batch, the index of a document
+### stays the index it had in the request and the order of the documents with
+### the same score does not change
+select ai_rerank('mock_rerank_model', 'doc',
+                 json_array('doc 00', 'doc 01', 'doc 02', 'doc 03', 'doc 04',
+                            'doc 05', 'doc 06', 'doc 07', 'doc 08', 'doc 09',
+                            'doc 10', 'doc 11', 'doc 12', 'doc 13', 'doc 14',
+                            'doc 15', 'doc 16', 'doc 17', 'doc 18', 'doc 19',
+                            'doc 20', 'doc 21', 'doc 22', 'doc 23', 'doc 24'));
+
+### clean up
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_complete_endpoint');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_embed_endpoint');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_rerank_endpoint');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_ollama_endpoint');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_ollama_embed_endpoint');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_complete_model');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_embed_model');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_rerank_model');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_ollama_model');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_ollama_embed_model');
