@@ -145,7 +145,7 @@ int ObExprAIPrompt::eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
 
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_array(tmp_allocator, args_array))) {
-  } else if (OB_NOTNULL(prefix_args)) {
+  } else if (OB_NOT_NULL(prefix_args)) {
     for (int64_t i = 0; OB_SUCC(ret) && i < prefix_args->element_count(); i++) {
       if (OB_FAIL(args_array->append(prefix_args->get_value(i)))) {
       }

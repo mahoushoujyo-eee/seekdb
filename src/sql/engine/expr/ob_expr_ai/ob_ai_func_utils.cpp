@@ -269,7 +269,7 @@ int ObOpenAIUtils::ObOpenAIEmbed::parse_output(common::ObIAllocator &allocator,
             if (pos < 0) {
               // No usable index, keep the order the provider answered in.
               pos = 0;
-              while (pos < count && OB_NOTNULL(ordered_embeddings[pos])) {
+              while (pos < count && OB_NOT_NULL(ordered_embeddings[pos])) {
                 pos++;
               }
             }
@@ -394,7 +394,7 @@ int ObOllamaUtils::ObOllamaComplete::get_body(common::ObIAllocator &allocator,
         body = body_obj;
       }
     }
-    if (OB_SUCC(ret) && OB_NOTNULL(body)) {
+    if (OB_SUCC(ret) && OB_NOT_NULL(body)) {
       ObJsonBoolean *stream_false = nullptr;
       if (OB_FAIL(ObAIFuncJsonUtils::get_json_boolean(allocator, false, stream_false))) {
       } else if (OB_FAIL(ObAIFuncJsonUtils::compact_json_object(allocator, config, body_obj))) {
@@ -509,7 +509,7 @@ int ObOllamaUtils::ObOllamaEmbed::get_body(common::ObIAllocator &allocator,
         body = body_obj;
       }
     }
-    if (OB_SUCC(ret) && OB_NOTNULL(body)) {
+    if (OB_SUCC(ret) && OB_NOT_NULL(body)) {
       if (OB_FAIL(ObAIFuncJsonUtils::compact_json_object(allocator, config, body_obj))) {
       }
     }
