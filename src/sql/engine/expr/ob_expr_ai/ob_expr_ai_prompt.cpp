@@ -26,10 +26,21 @@
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
 
-namespace oceanbase 
+namespace oceanbase
 {
-namespace sql 
+namespace sql
 {
+
+namespace
+{
+// The text type class of the database holds the blob types as well, a prompt
+// takes text, not binary.
+inline bool is_text_type(ObObjType type)
+{
+  return type == ObTinyTextType || type == ObTextType
+      || type == ObMediumTextType || type == ObLongTextType;
+}
+} // namespace
 
 ObExprAIPrompt::ObExprAIPrompt(common::ObIAllocator &alloc)
     : ObFuncExprOperator(alloc, 
@@ -55,7 +66,7 @@ int ObExprAIPrompt::calc_result_typeN(ObExprResType &type,
   if (ob_is_string_tc(template_type.get_type())) {
     types_stack[0].set_calc_type(ObVarcharType);
     types_stack[0].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
-  } else if (ob_is_text_tc(template_type.get_type())) {
+  } else if (is_text_type(template_type.get_type())) {
     // A text or longtext template is read as it is, it must not be cast down
     // to a varchar.
     types_stack[0].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
@@ -70,7 +81,7 @@ int ObExprAIPrompt::calc_result_typeN(ObExprResType &type,
     if (ob_is_string_tc(types_stack[i].get_type())) {
       types_stack[i].set_calc_type(ObVarcharType);
       types_stack[i].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
-    } else if (ob_is_text_tc(types_stack[i].get_type())) {
+    } else if (is_text_type(types_stack[i].get_type())) {
       types_stack[i].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
     } else if (ob_is_json(types_stack[i].get_type())) {
       // A json array or a json object is used as one argument.
