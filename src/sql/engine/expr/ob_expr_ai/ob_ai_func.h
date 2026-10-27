@@ -71,16 +71,21 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObAIFuncBase);
 };
 
+// The endpoint url is handed to the provider so that a provider speaking more
+// than one native protocol (Ollama exposes /api/generate, /api/chat,
+// /api/embed and /api/embeddings) can pick the wire format that matches the
+// url the user configured for the endpoint.
 class ObAIFuncIComplete : public ObAIFuncBase 
 {
 public:
   ObAIFuncIComplete() {}
   virtual ~ObAIFuncIComplete() {}
   virtual int get_body(common::ObIAllocator &allocator,
-                       common::ObString &model,
+                       common::ObString &model, 
                        common::ObString &prompt, 
                        common::ObString &content,
                        common::ObJsonObject *config,
+                       const common::ObString &url,
                        common::ObJsonObject *&body) = 0;
   virtual int set_config_json_format(common::ObIAllocator &allocator, common::ObJsonObject *config) = 0;
 private:
@@ -96,6 +101,7 @@ public:
                        common::ObString &model,
                        common::ObArray<ObString> &contents,
                        common::ObJsonObject *config,
+                       const common::ObString &url,
                        common::ObJsonObject *&body) = 0;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObAIFuncIEmbed);
@@ -111,6 +117,7 @@ public:
                        common::ObString &query,
                        common::ObJsonArray *document_array,
                        common::ObJsonObject *config,
+                       const common::ObString &url,
                        common::ObJsonObject *&body) = 0;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObAIFuncIRerank);

@@ -42,6 +42,7 @@ public:
                          common::ObString &prompt,
                          common::ObString &content,
                          common::ObJsonObject *config,
+                         const common::ObString &url,
                          common::ObJsonObject *&body) override;
     virtual int parse_output(common::ObIAllocator &allocator,
                              common::ObJsonObject *http_response,
@@ -65,6 +66,7 @@ public:
                          common::ObString &model, 
                          common::ObArray<ObString> &contents,
                          common::ObJsonObject *config,
+                         const common::ObString &url,
                          common::ObJsonObject *&body) override;
     virtual int parse_output(common::ObIAllocator &allocator,
                              common::ObJsonObject *http_response,
@@ -91,10 +93,11 @@ public:
                            common::ObString &api_key,
                            common::ObArray<ObString> &headers) override;
     virtual int get_body(common::ObIAllocator &allocator,
-                         common::ObString &model, 
+                         common::ObString &model,
                          common::ObString &prompt,
                          common::ObString &content,
                          common::ObJsonObject *config,
+                         const common::ObString &url,
                          common::ObJsonObject *&body) override;
     virtual int parse_output(common::ObIAllocator &allocator,
                              common::ObJsonObject *http_response,
@@ -116,6 +119,7 @@ public:
                          common::ObString &model,
                          common::ObArray<ObString> &contents,
                          common::ObJsonObject *config,
+                         const common::ObString &url,
                          common::ObJsonObject *&body) override;
     virtual int parse_output(common::ObIAllocator &allocator,
                              common::ObJsonObject *http_response,
@@ -139,10 +143,11 @@ public:
                            common::ObString &api_key,
                            common::ObArray<ObString> &headers) override;
     virtual int get_body(common::ObIAllocator &allocator,
-                         common::ObString &model, 
+                         common::ObString &model,
                          common::ObString &prompt,
                          common::ObString &content,
                          common::ObJsonObject *config,
+                         const common::ObString &url,
                          common::ObJsonObject *&body) override;
     virtual int parse_output(common::ObIAllocator &allocator,
                              common::ObJsonObject *http_response,
@@ -162,9 +167,10 @@ public:
                            common::ObString &api_key,
                            common::ObArray<ObString> &headers) override;
     virtual int get_body(common::ObIAllocator &allocator,
-                         common::ObString &model, 
+                         common::ObString &model,
                          common::ObArray<ObString> &contents,
                          common::ObJsonObject *config,
+                         const common::ObString &url,
                          common::ObJsonObject *&body) override;
     virtual int parse_output(common::ObIAllocator &allocator,
                              common::ObJsonObject *http_response,
@@ -185,6 +191,7 @@ public:
                          common::ObString &query,
                          common::ObJsonArray *document_array,
                          common::ObJsonObject *config,
+                         const common::ObString &url,
                          common::ObJsonObject *&body) override;
     virtual int parse_output(common::ObIAllocator &allocator,
                              common::ObJsonObject *http_response,
@@ -217,6 +224,7 @@ public:
                          common::ObString &query,
                          common::ObJsonArray *document_array,
                          common::ObJsonObject *config,
+                         const common::ObString &url,
                          common::ObJsonObject *&body) override;
     virtual int parse_output(common::ObIAllocator &allocator,
                              common::ObJsonObject *http_response,
@@ -236,11 +244,13 @@ public:
   ObAIFuncJsonUtils() {}
   virtual ~ObAIFuncJsonUtils() {}
   static bool ob_is_json_array_all_str(ObJsonArray* json_array);
+  static bool ob_is_json_array_all_scalar(ObJsonArray* json_array);
   static int transform_array_to_json_array(ObIAllocator &allocator, ObArray<ObString> &contents, ObJsonArray *&array);
   static int get_json_object(ObIAllocator &allocator, ObJsonObject *&obj_node);
   static int get_json_array(ObIAllocator &allocator, ObJsonArray *&array_node);
   static int get_json_string(ObIAllocator &allocator, ObString &str, ObJsonString *&str_node);
   static int get_json_int(ObIAllocator &allocator, int64_t num, ObJsonInt *&int_node);
+  static int get_json_double(ObIAllocator &allocator, double num, ObJsonDouble *&double_node);
   static int get_json_boolean(ObIAllocator &allocator, bool value, ObJsonBoolean *&boolean_node);
   static int get_json_object_form_str(ObIAllocator &allocator, ObString &str, ObJsonObject *&obj_node);
   static int print_json_to_str(ObIAllocator &allocator, ObIJsonBase *base_node, ObString &str);
@@ -330,6 +340,11 @@ public:
                                  ObIJsonBase *&result);
   static int set_string_result(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res, ObString &res_str);
   static bool is_provider_support_base64(const ObString &provider);
+  // Check that every element of an embedding vector is a number.
+  static int check_embedding_elements(ObJsonArray *vector);
+  // Decode a base64 encoded embedding vector and turn it into a json array.
+  static int decode_base64_embedding_to_json(ObIAllocator &allocator, ObIJsonBase &embedding_jbase,
+                                             const int64_t dimension, ObJsonArray *&vector);
   static int decode_base64_embedding_array(const ObIJsonBase &embedding_jbase, ObIAllocator &allocator,
                                            const int64_t dimension, float *&vector);
   static int decode_float_embedding_array(const ObIJsonBase &embedding_jbase, ObIAllocator &allocator,
@@ -371,7 +386,7 @@ public:
    DISALLOW_COPY_AND_ASSIGN(ObAIFuncModel);
 };
 
-class ObAIFuncPromptObjectUtils
+class ObAIFuncPromptObjectUtils 
 {
 public:
   ObAIFuncPromptObjectUtils() {}
@@ -379,6 +394,20 @@ public:
   static bool is_valid_prompt_object(ObJsonObject* prompt_object);
   static int replace_all_str_args_in_template(ObIAllocator &allocator, ObJsonObject* prompt_object, ObString& replaced_prompt_str);
   static int construct_prompt_object(ObIAllocator &allocator, ObString &template_str, ObJsonArray *args_array, ObJsonObject *&prompt_object);
+  // Render a single prompt argument into the text that replaces a placeholder.
+  // A json string argument is used as is, a json array or object argument is
+  // rendered as its compact json text.
+  static int get_arg_text(ObIAllocator &allocator, ObIJsonBase *arg_node, ObString &arg_text);
+  // Append a json argument node (string / array / object) to the args array.
+  static int append_arg_node(ObIAllocator &allocator, ObJsonArray *args_array, ObIJsonBase *arg_node);
+  // Resolve a prompt object into the final template text, that is replace every
+  // "{<index>}" placeholder with the matching argument.
+  static int resolve_prompt_object(ObIAllocator &allocator, ObJsonObject *prompt_object, ObString &resolved_template);
+  // Scan a "{<index>}" placeholder. `found` tells whether a well formed
+  // placeholder was found, `end_pos` receives the index of the closing brace and
+  // `index` the argument index.
+  static int parse_placeholder(const char *ptr, const int64_t len, const int64_t start,
+                               int64_t &end_pos, int64_t &index, bool &found);
   static constexpr char prompt_template_key[20] = "template";
   static constexpr char prompt_args_key[20] = "args";
 private:
