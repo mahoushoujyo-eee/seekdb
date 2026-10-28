@@ -262,7 +262,14 @@ int ObExprAIRerank::get_doc_array_from_documents_array_with_key(ObIAllocator &al
           } else if (doc_value_node->json_type() != ObJsonNodeType::J_STRING) {
             ret = OB_INVALID_ARGUMENT;
             LOG_USER_ERROR (OB_INVALID_ARGUMENT, "ai_rerank, the value for given doc key is not string");
-          } else if (OB_FAIL(doc_array_obj->append(doc_value_node))) {
+          } else {
+            // The value belongs to the document array, it is copied before it
+            // goes into the array that is sent to the model.
+            ObJsonNode *doc_value_copy = doc_value_node->clone(&allocator, true);
+            if (OB_ISNULL(doc_value_copy)) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (OB_FAIL(doc_array_obj->append(doc_value_copy))) {
+            }
           }
         }
       }
@@ -308,11 +315,16 @@ int ObExprAIRerank::sort_document_array_by_model_result(ObIAllocator &allocator,
           } else {
             ObJsonNode *origin_node = document_array->get_value(index);
             ObJsonObject *new_obj = nullptr;
+            // The score belongs to the answer of the model, it is copied before
+            // it goes into the document.
+            ObJsonNode *score_copy = score_node->clone(&allocator, true);
             if (OB_ISNULL(origin_node) || origin_node->json_type() != ObJsonNodeType::J_OBJECT) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (OB_ISNULL(score_copy)) {
               ret = OB_ERR_UNEXPECTED;
             } else if (OB_ISNULL(new_obj = static_cast<ObJsonObject *>(origin_node->clone(&allocator, true)))) {
               ret = OB_ERR_UNEXPECTED;
-            } else if (OB_FAIL(new_obj->add(MODEL_SCORE_KEY, score_node))) {
+            } else if (OB_FAIL(new_obj->add(MODEL_SCORE_KEY, score_copy))) {
             } else if (OB_FAIL(sorted_document_array_obj->append(new_obj))) {
             }
           }
