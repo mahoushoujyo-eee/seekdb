@@ -265,6 +265,13 @@ SQL_UNITY_GROUPS = [
         external_srcs = [],
     ),
     struct(
+        name = "ob_sql_engine_file_scan_utils",
+        language = "c++",
+        srcs = ["src/sql/engine/basic/ob_file_scan_utils.cpp"],
+        generated_srcs = [],
+        external_srcs = [],
+    ),
+    struct(
         name = "ob_sql_engine_cmd_0",
         language = "c++",
         srcs = [

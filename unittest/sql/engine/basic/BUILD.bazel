@@ -1,0 +1,19 @@
+load("//bazel:defs.bzl", "seekdb_cc_library", "seekdb_cc_test")
+
+package(default_testonly = True)
+
+seekdb_cc_library(
+    name = "file_scan_utils_test_cases",
+    srcs = ["test_file_scan_utils.cpp"],
+    alwayslink = True,
+    deps = [
+        "@seekdb_3rd_headers//:gtest",
+        "//src/sql:sql_unit_test_interface",
+    ],
+)
+
+seekdb_cc_test(
+    name = "test_file_scan_utils",
+    deps = [":file_scan_utils_test_cases"],
+    visibility = ["//visibility:private"],
+)
