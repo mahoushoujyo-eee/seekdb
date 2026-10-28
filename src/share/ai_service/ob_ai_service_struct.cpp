@@ -128,6 +128,10 @@ int ObAiModelEndpointInfo::check_valid() const
   } else if (!response_transform_fn_.empty()) {
     ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, strlen("response_transform_fn"), "response_transform_fn");
+  } else if (max_concurrency_ != MAX_CONCURRENCY_UNSET
+             && (max_concurrency_ < MAX_CONCURRENCY_MIN || max_concurrency_ > MAX_CONCURRENCY_MAX)) {
+    ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
+    LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, strlen("max_concurrency"), "max_concurrency");
   }
   if (OB_SUCC(ret) && access_key_.empty()) {
     // A provider that serves local models does not need an access key, the
@@ -167,6 +171,27 @@ int ObAiModelEndpointInfo::merge_delta_endpoint(common::ObArenaAllocator &alloca
       EXTRACT_JSON_ELEM_STR("parameters", parameters_)
       EXTRACT_JSON_ELEM_STR("request_transform_fn", request_transform_fn_)
       EXTRACT_JSON_ELEM_STR("response_transform_fn", response_transform_fn_)
+      if (elem.first.case_compare("max_concurrency") == 0) {
+        // The limit of the requests the endpoint serves at the same time is a
+        // number, a string or a fraction is not one.
+        int64_t value = 0;
+        if (elem.second->json_type() == ObJsonNodeType::J_INT) {
+          value = static_cast<ObJsonInt *>(elem.second)->value();
+        } else if (elem.second->json_type() == ObJsonNodeType::J_UINT) {
+          value = static_cast<int64_t>(static_cast<ObJsonUint *>(elem.second)->value());
+        } else {
+          ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
+          LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, elem.first.length(), elem.first.ptr());
+          LOG_WARN("invalid json type", K(ret), K(elem.first), K(elem.second->json_type()));
+        }
+        if (OB_SUCC(ret) && (value < MAX_CONCURRENCY_MIN || value > MAX_CONCURRENCY_MAX)) {
+          ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
+          LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, elem.first.length(), elem.first.ptr());
+          LOG_WARN("the max concurrency is out of range", K(ret), K(value));
+        } else if (OB_SUCC(ret)) {
+          max_concurrency_ = value;
+        }
+      } else
       EXTRACT_JSON_ELEM_END()
     }
     iter.next();

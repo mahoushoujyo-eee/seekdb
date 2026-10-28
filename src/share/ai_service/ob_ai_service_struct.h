@@ -48,6 +48,7 @@ public:
     parameters_.reset();
     request_transform_fn_.reset();
     response_transform_fn_.reset();
+    max_concurrency_ = MAX_CONCURRENCY_UNSET;
     endpoint_id_ = OB_INVALID_ID;
   }
 
@@ -67,8 +68,16 @@ public:
   const ObString &get_parameters() const { return parameters_; }
   const ObString &get_request_transform_fn() const { return request_transform_fn_; }
   const ObString &get_response_transform_fn() const { return response_transform_fn_; }
+  // The number of requests the endpoint serves at the same time, zero means
+  // that the endpoint does not limit them.
+  int64_t get_max_concurrency() const { return max_concurrency_; }
   uint64_t get_endpoint_id() const { return endpoint_id_; }
   void set_endpoint_id(uint64_t endpoint_id) { endpoint_id_ = endpoint_id; }
+
+  // The endpoint does not limit the requests it serves.
+  static constexpr int64_t MAX_CONCURRENCY_UNSET = 0;
+  static constexpr int64_t MAX_CONCURRENCY_MIN = 1;
+  static constexpr int64_t MAX_CONCURRENCY_MAX = 1024;
 
   TO_STRING_KV(K_(name),
                K_(scope),
@@ -98,6 +107,7 @@ private:
   ObString parameters_;
   ObString request_transform_fn_;
   ObString response_transform_fn_;
+  int64_t max_concurrency_;
 };
 
 } // namespace share
