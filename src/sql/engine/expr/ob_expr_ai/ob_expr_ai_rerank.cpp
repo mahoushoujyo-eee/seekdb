@@ -348,7 +348,13 @@ int ObExprAIRerank::sort_document_array_by_model_result(ObIAllocator &allocator,
         if (!get_json_int_value(index_node, index)
             || OB_ISNULL(score_node) || !share::ObJsonHelper::is_number_type(score_node)) {
           ret = OB_ERR_UNEXPECTED;
-          LOG_USER_ERROR(OB_ERR_UNEXPECTED, "ai_rerank, the answer of the model holds no index or score");
+          ObString debug_str;
+          if (OB_SUCCESS == ObAIFuncJsonUtils::print_json_to_str(allocator, model_result_array, debug_str)) {
+            LOG_USER_ERROR(OB_ERR_UNEXPECTED, "ai_rerank, the answer of the model holds no index or score: %.*s",
+                           static_cast<int>(debug_str.length()), debug_str.ptr());
+          } else {
+            LOG_USER_ERROR(OB_ERR_UNEXPECTED, "ai_rerank, the answer of the model holds no index or score");
+          }
         } else {
           if (index < 0 || index >= document_array->element_count()) {
             // The model reported an index that does not belong to the request.
