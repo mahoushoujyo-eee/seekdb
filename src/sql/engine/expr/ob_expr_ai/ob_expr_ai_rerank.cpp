@@ -287,6 +287,7 @@ int ObExprAIRerank::sort_document_array_by_model_result(ObIAllocator &allocator,
   ObJsonArray *sorted_document_array_obj = nullptr;
   if (OB_ISNULL(document_array) || OB_ISNULL(model_result_array)) {
     ret = OB_ERR_UNEXPECTED;
+    LOG_USER_ERROR(OB_ERR_UNEXPECTED, "ai_rerank, the documents or the answer of the model are missing");
   } else if (model_result_array->element_count() != document_array->element_count()) {
     // The model has to rank every document, otherwise the result could not be
     // mapped back onto the documents.
@@ -299,6 +300,7 @@ int ObExprAIRerank::sort_document_array_by_model_result(ObIAllocator &allocator,
       ObJsonNode *model_result_node = model_result_array->get_value(i);
       if (OB_ISNULL(model_result_node) || model_result_node->json_type() != ObJsonNodeType::J_OBJECT) {
         ret = OB_ERR_UNEXPECTED;
+        LOG_USER_ERROR(OB_ERR_UNEXPECTED, "ai_rerank, the answer of the model holds no object");
       } else {
         ObJsonObject *model_result_obj = static_cast<ObJsonObject *>(model_result_node);
         ObJsonNode *index_node = model_result_obj->get_value(INDEX_KEY);
@@ -306,6 +308,7 @@ int ObExprAIRerank::sort_document_array_by_model_result(ObIAllocator &allocator,
         if (OB_ISNULL(index_node) || index_node->json_type() != ObJsonNodeType::J_INT
             || OB_ISNULL(score_node) || !share::ObJsonHelper::is_number_type(score_node)) {
           ret = OB_ERR_UNEXPECTED;
+          LOG_USER_ERROR(OB_ERR_UNEXPECTED, "ai_rerank, the answer of the model holds no index or score");
         } else {
           int64_t index = static_cast<ObJsonInt *>(index_node)->value();
           if (index < 0 || index >= document_array->element_count()) {
@@ -320,10 +323,13 @@ int ObExprAIRerank::sort_document_array_by_model_result(ObIAllocator &allocator,
             ObJsonNode *score_copy = score_node->clone(&allocator, true);
             if (OB_ISNULL(origin_node) || origin_node->json_type() != ObJsonNodeType::J_OBJECT) {
               ret = OB_ERR_UNEXPECTED;
+              LOG_USER_ERROR(OB_ERR_UNEXPECTED, "ai_rerank, the document is no object");
             } else if (OB_ISNULL(score_copy)) {
               ret = OB_ERR_UNEXPECTED;
+              LOG_USER_ERROR(OB_ERR_UNEXPECTED, "ai_rerank, the score could not be copied");
             } else if (OB_ISNULL(new_obj = static_cast<ObJsonObject *>(origin_node->clone(&allocator, true)))) {
               ret = OB_ERR_UNEXPECTED;
+              LOG_USER_ERROR(OB_ERR_UNEXPECTED, "ai_rerank, the document could not be copied");
             } else if (OB_FAIL(new_obj->add(MODEL_SCORE_KEY, score_copy))) {
             } else if (OB_FAIL(sorted_document_array_obj->append(new_obj))) {
             }
