@@ -408,6 +408,9 @@ public:
   // `index` the argument index.
   static int parse_placeholder(const char *ptr, const int64_t len, const int64_t start,
                                int64_t &end_pos, int64_t &index, bool &found);
+  // Check that every placeholder of the template refers to an argument that
+  // exists.
+  static int check_placeholders(const ObString &template_str, const int64_t args_count);
   static constexpr char prompt_template_key[20] = "template";
   static constexpr char prompt_args_key[20] = "args";
 private:
