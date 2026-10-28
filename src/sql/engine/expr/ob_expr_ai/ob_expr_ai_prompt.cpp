@@ -33,12 +33,11 @@ namespace sql
 
 namespace
 {
-// The text type class of the database holds the blob types as well, a prompt
-// takes text, not binary.
-inline bool is_text_type(ObObjType type)
+// The blob types share the type class of the text types, a blob has a binary
+// collation, so the collation tells them apart.
+inline bool is_text_type(ObObjType type, ObCollationType cs_type)
 {
-  return type == ObTinyTextType || type == ObTextType
-      || type == ObMediumTextType || type == ObLongTextType;
+  return ob_is_text(type, cs_type);
 }
 } // namespace
 
@@ -66,10 +65,9 @@ int ObExprAIPrompt::calc_result_typeN(ObExprResType &type,
   if (ob_is_string_tc(template_type.get_type())) {
     types_stack[0].set_calc_type(ObVarcharType);
     types_stack[0].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
-  } else if (is_text_type(template_type.get_type())) {
+  } else if (is_text_type(template_type.get_type(), template_type.get_collation_type())) {
     // A text or longtext template is read as it is, it must not be cast down
     // to a varchar.
-    types_stack[0].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
   } else if (ob_is_json(template_type.get_type())) {
     // A nested prompt, the template is the prompt object an inner ai_prompt
     // returned.
@@ -81,8 +79,8 @@ int ObExprAIPrompt::calc_result_typeN(ObExprResType &type,
     if (ob_is_string_tc(types_stack[i].get_type())) {
       types_stack[i].set_calc_type(ObVarcharType);
       types_stack[i].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
-    } else if (is_text_type(types_stack[i].get_type())) {
-      types_stack[i].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
+    } else if (is_text_type(types_stack[i].get_type(), types_stack[i].get_collation_type())) {
+      // A text or longtext argument is read as it is.
     } else if (ob_is_json(types_stack[i].get_type())) {
       // A json array or a json object is used as one argument.
     } else {
@@ -197,6 +195,8 @@ int ObExprAIPrompt::eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
   }
 
   if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(ObAIFuncPromptObjectUtils::check_placeholders(
+                       template_str, args_array->element_count()))) {
   } else if (OB_FAIL(ObAIFuncPromptObjectUtils::construct_prompt_object(tmp_allocator, template_str, args_array, prompt_object))) {
   } else {
     ObString raw_str;

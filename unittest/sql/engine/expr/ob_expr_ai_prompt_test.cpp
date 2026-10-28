@@ -296,6 +296,75 @@ TEST_F(TestObExprAIPrompt, empty_argument)
   EXPECT_EQ("1+1=?", to_std_string(replaced));
 }
 
+// An index that does not belong to the argument list is an error.
+TEST_F(TestObExprAIPrompt, illegal_placeholder_index)
+{
+  ObJsonObject *prompt_object = nullptr;
+  std::vector<ObString> args;
+  args.push_back(ObString("a"));
+  ASSERT_EQ(OB_SUCCESS, build_prompt("{3}", args, prompt_object));
+
+  ObString replaced;
+  EXPECT_EQ(OB_INVALID_ARGUMENT,
+            ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(
+                allocator_, prompt_object, replaced));
+  EXPECT_EQ(OB_INVALID_ARGUMENT,
+            ObAIFuncPromptObjectUtils::check_placeholders(ObString("{3}"), 1));
+  EXPECT_EQ(OB_SUCCESS,
+            ObAIFuncPromptObjectUtils::check_placeholders(ObString("{0}"), 1));
+  EXPECT_EQ(OB_SUCCESS,
+            ObAIFuncPromptObjectUtils::check_placeholders(ObString("no placeholder"), 0));
+}
+
+// The prompt object is built out of a template and its arguments.
+TEST_F(TestObExprAIPrompt, prompt_object_carries_the_arguments)
+{
+  ObJsonObject *prompt_object = nullptr;
+  std::vector<ObString> args;
+  args.push_back(ObString("a"));
+  args.push_back(ObString("b"));
+  ASSERT_EQ(OB_SUCCESS, build_prompt("{0} {1}", args, prompt_object));
+  ASSERT_NE(nullptr, prompt_object);
+  ASSERT_NE(nullptr, prompt_object->get_value(ObAIFuncPromptObjectUtils::prompt_template_key));
+  ASSERT_NE(nullptr, prompt_object->get_value(ObAIFuncPromptObjectUtils::prompt_args_key));
+  ObJsonArray *prompt_args = static_cast<ObJsonArray *>(
+      prompt_object->get_value(ObAIFuncPromptObjectUtils::prompt_args_key));
+  ASSERT_EQ(2, prompt_args->element_count());
+}
+
+// A json array or a json object is one argument.
+TEST_F(TestObExprAIPrompt, json_arguments)
+{
+  ObJsonObject *object_prompt = nullptr;
+  ASSERT_EQ(OB_SUCCESS, build_prompt_with_json_arg(
+                            "{0}", "{\"k\":\"v\"}", object_prompt));
+  ObString replaced;
+  ASSERT_EQ(OB_SUCCESS, ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(
+                            allocator_, object_prompt, replaced));
+  EXPECT_EQ("{\"k\":\"v\"}", to_std_string(replaced));
+
+  ObJsonObject *array_prompt = nullptr;
+  ASSERT_EQ(OB_SUCCESS, build_prompt_with_json_arg(
+                            "{0}", "[\"a\",\"b\"]", array_prompt));
+  ASSERT_EQ(OB_SUCCESS, ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(
+                            allocator_, array_prompt, replaced));
+  EXPECT_EQ("[\"a\",\"b\"]", to_std_string(replaced));
+}
+
+// The arguments of a prompt object may be json values as well.
+TEST_F(TestObExprAIPrompt, json_arguments_in_the_prompt_object)
+{
+  ObJsonObject *prompt_object = nullptr;
+  ASSERT_EQ(OB_SUCCESS, build_prompt_with_json_arg(
+                            "{0}", "{\"k\":\"v\"}", prompt_object));
+  EXPECT_TRUE(ObAIFuncPromptObjectUtils::is_valid_prompt_object(prompt_object));
+  ObJsonArray *prompt_args = static_cast<ObJsonArray *>(
+      prompt_object->get_value(ObAIFuncPromptObjectUtils::prompt_args_key));
+  ASSERT_NE(nullptr, prompt_args);
+  ASSERT_EQ(1, prompt_args->element_count());
+  EXPECT_EQ(ObJsonNodeType::J_OBJECT, prompt_args->get_value(0)->json_type());
+}
+
 } // namespace common
 } // namespace oceanbase
 

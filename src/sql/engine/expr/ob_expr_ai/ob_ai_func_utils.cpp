@@ -1951,6 +1951,31 @@ int ObAIFuncPromptObjectUtils::parse_placeholder(const char *ptr, const int64_t 
   return ret;
 }
 
+int ObAIFuncPromptObjectUtils::check_placeholders(const ObString &template_str, const int64_t args_count)
+{
+  int ret = OB_SUCCESS;
+  const char *ptr = template_str.ptr();
+  const int64_t len = template_str.length();
+  for (int64_t i = 0; OB_SUCC(ret) && i < len; i++) {
+    if (ptr[i] != '{') {
+      continue;
+    }
+    int64_t end_pos = 0;
+    int64_t index = 0;
+    bool found = false;
+    if (OB_FAIL(parse_placeholder(ptr, len, i, end_pos, index, found))) {
+    } else if (found) {
+      if (index < 0 || index >= args_count) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt: invalid placeholder index");
+      } else {
+        i = end_pos;
+      }
+    }
+  }
+  return ret;
+}
+
 int ObAIFuncPromptObjectUtils::get_arg_text(ObIAllocator &allocator, ObIJsonBase *arg_node, ObString &arg_text)
 {
   int ret = OB_SUCCESS;
