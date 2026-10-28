@@ -16,6 +16,7 @@
 
 #include "share/ai_service/ob_ai_service_struct.h"
 #include "lib/json/ob_json.h"
+#include "common/json_type/ob_json_tree.h"
 
 
 #define USING_LOG_PREFIX SHARE
