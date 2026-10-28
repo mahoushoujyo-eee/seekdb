@@ -22,11 +22,15 @@ do not change between the runs.
 
 import argparse
 import json
+import os
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # The dimension of the embeddings the service answers with.
 EMBEDDING_DIMENSION = 4
+
+# Set MOCK_AI_LOG to a file to keep a log of the requests that came in.
+LOG_REQUESTS = os.environ.get("MOCK_AI_LOG")
 
 
 def embedding_of(text):
@@ -59,6 +63,10 @@ class MockAIHandler(BaseHTTPRequestHandler):
             payload = {}
         if not isinstance(payload, dict):
             payload = {}
+        if LOG_REQUESTS:
+            with open(LOG_REQUESTS, "a", encoding="utf-8") as log:
+                log.write("%s %s\n" % (self.path, json.dumps(payload)))
+                log.flush()
 
         path = self.path.split("?")[0]
         if path == "/v1/chat/completions":
