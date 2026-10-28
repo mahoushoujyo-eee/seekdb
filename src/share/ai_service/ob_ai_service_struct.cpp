@@ -82,6 +82,7 @@ int ObAiModelEndpointInfo::deep_copy(
   int ret = OB_SUCCESS;
   reset();
   endpoint_id_ = other.endpoint_id_;
+  max_concurrency_ = other.max_concurrency_;
   if (OB_FAIL(ob_write_string(allocator, other.name_, name_))) {
   } else if (OB_FAIL(ob_write_string(allocator, other.scope_, scope_))) {
   } else if (OB_FAIL(ob_write_string(allocator, other.ai_model_name_, ai_model_name_))) {
@@ -177,9 +178,9 @@ int ObAiModelEndpointInfo::merge_delta_endpoint(common::ObArenaAllocator &alloca
         // number, a string or a fraction is not one.
         int64_t value = 0;
         if (elem.second->json_type() == ObJsonNodeType::J_INT) {
-          value = static_cast<ObJsonInt *>(elem.second)->value();
+          value = elem.second->get_int();
         } else if (elem.second->json_type() == ObJsonNodeType::J_UINT) {
-          value = static_cast<int64_t>(static_cast<ObJsonUint *>(elem.second)->value());
+          value = static_cast<int64_t>(elem.second->get_uint());
         } else {
           ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
           LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, elem.first.length(), elem.first.ptr());
