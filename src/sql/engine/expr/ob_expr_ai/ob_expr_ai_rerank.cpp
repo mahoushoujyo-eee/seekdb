@@ -48,6 +48,25 @@ inline bool get_json_int_value(ObJsonNode *node, int64_t &value)
   }
   return ok;
 }
+
+// The member of an object is found by its key. The members are walked, the
+// search of the object does not find a member that is not sorted the way the
+// object expects it.
+inline ObJsonNode *find_member(ObJsonObject *obj, const ObString &key)
+{
+  ObJsonNode *found = nullptr;
+  if (OB_NOT_NULL(obj)) {
+    for (int64_t i = 0; i < obj->element_count(); i++) {
+      ObString member_key;
+      ObJsonNode *value = nullptr;
+      if (OB_SUCC(obj->get_value_by_idx(i, member_key, value)) && member_key == key) {
+        found = value;
+        break;
+      }
+    }
+  }
+  return found;
+}
 } // namespace
 
 ObExprAIRerank::ObExprAIRerank(common::ObIAllocator &alloc)
@@ -323,18 +342,12 @@ int ObExprAIRerank::sort_document_array_by_model_result(ObIAllocator &allocator,
         LOG_USER_ERROR(OB_ERR_UNEXPECTED, "ai_rerank, the answer of the model holds no object");
       } else {
         ObJsonObject *model_result_obj = static_cast<ObJsonObject *>(model_result_node);
-        ObJsonNode *index_node = model_result_obj->get_value(INDEX_KEY);
-        ObJsonNode *score_node = model_result_obj->get_value(SCORE_KEY);
+        ObJsonNode *index_node = find_member(model_result_obj, ObString(INDEX_KEY));
+        ObJsonNode *score_node = find_member(model_result_obj, ObString(SCORE_KEY));
         int64_t index = 0;
         if (!get_json_int_value(index_node, index)
             || OB_ISNULL(score_node) || !share::ObJsonHelper::is_number_type(score_node)) {
           ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("ai_rerank, the answer of the model holds no index or score",
-                   K(index_node == nullptr),
-                   K(index_node == nullptr ? -1 : static_cast<int>(index_node->json_type())),
-                   K(score_node == nullptr),
-                   K(score_node == nullptr ? -1 : static_cast<int>(score_node->json_type())),
-                   K(count), K(document_array->element_count()));
           LOG_USER_ERROR(OB_ERR_UNEXPECTED, "ai_rerank, the answer of the model holds no index or score");
         } else {
           if (index < 0 || index >= document_array->element_count()) {
@@ -426,13 +439,17 @@ int ObExprAIRerank::batch_result_add_base(ObIAllocator &allocator, ObJsonArray *
     if (OB_ISNULL(obj) || node->json_type() != ObJsonNodeType::J_OBJECT) {
       ret = OB_ERR_UNEXPECTED;
     } else {
-      ObJsonNode *index_node = obj->get_value(index_key);
-      if (OB_ISNULL(index_node) || index_node->json_type() != ObJsonNodeType::J_INT) {
+      ObJsonNode *index_node = find_member(obj, index_key);
+      int64_t index = 0;
+      if (!get_json_int_value(index_node, index)) {
         ret = OB_ERR_UNEXPECTED;
-      } else {
+        LOG_USER_ERROR(OB_ERR_UNEXPECTED, "ai_rerank, the answer of the model holds no index");
+      } else if (index_node->json_type() == ObJsonNodeType::J_INT) {
         ObJsonInt *int_obj = static_cast<ObJsonInt *>(index_node);
-        int64_t id = int_obj->value() + start_idx;
-        int_obj->set_value(id);
+        int_obj->set_value(index + start_idx);
+      } else {
+        ObJsonUint *uint_obj = static_cast<ObJsonUint *>(index_node);
+        uint_obj->set_value(static_cast<uint64_t>(index + start_idx));
       }
     }
   }
