@@ -33,11 +33,12 @@ namespace sql
 
 namespace
 {
-// The blob types share the type class of the text types, a blob has a binary
-// collation, so the collation tells them apart.
-inline bool is_text_type(ObObjType type, ObCollationType cs_type)
+// The text types and the blob types share one type class, both of them hold
+// the data in a lob. The binary types are a string type, they hold the data
+// in the row itself.
+inline bool is_lob_string_type(ObObjType type)
 {
-  return ob_is_text(type, cs_type);
+  return ob_is_text_tc(type);
 }
 } // namespace
 
@@ -65,9 +66,9 @@ int ObExprAIPrompt::calc_result_typeN(ObExprResType &type,
   if (ob_is_string_tc(template_type.get_type())) {
     types_stack[0].set_calc_type(ObVarcharType);
     types_stack[0].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
-  } else if (is_text_type(template_type.get_type(), template_type.get_collation_type())) {
-    // A text or longtext template is read as it is, it must not be cast down
-    // to a varchar.
+  } else if (is_lob_string_type(template_type.get_type())) {
+    // A text, a longtext or a blob template is read as it is, it must not be
+    // cast down to a varchar.
   } else if (ob_is_json(template_type.get_type())) {
     // A nested prompt, the template is the prompt object an inner ai_prompt
     // returned.
@@ -79,8 +80,8 @@ int ObExprAIPrompt::calc_result_typeN(ObExprResType &type,
     if (ob_is_string_tc(types_stack[i].get_type())) {
       types_stack[i].set_calc_type(ObVarcharType);
       types_stack[i].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
-    } else if (is_text_type(types_stack[i].get_type(), types_stack[i].get_collation_type())) {
-      // A text or longtext argument is read as it is.
+    } else if (is_lob_string_type(types_stack[i].get_type())) {
+      // A text, a longtext or a blob argument is read as it is.
     } else if (ob_is_json(types_stack[i].get_type())) {
       // A json array or a json object is used as one argument.
     } else {
@@ -117,14 +118,11 @@ int ObExprAIPrompt::eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
     bool is_null = false;
     if (OB_FAIL(ObJsonExprHelper::get_json_doc(expr, ctx, tmp_allocator, TEMPLATE_IDX, j_base, is_null))) {
     } else if (OB_ISNULL(j_base)) {
-      ret = OB_INVALID_ARGUMENT;
-      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt, the template is null");
+      ret = OB_ERR_INVALID_TYPE_FOR_OP;
     } else if (j_base->json_type() != ObJsonNodeType::J_OBJECT) {
-      ret = OB_INVALID_ARGUMENT;
-      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt, the template is not a valid prompt object");
+      ret = OB_ERR_INVALID_TYPE_FOR_OP;
     } else if (!ObAIFuncPromptObjectUtils::is_valid_prompt_object(static_cast<ObJsonObject *>(j_base))) {
-      ret = OB_INVALID_ARGUMENT;
-      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt, the template is not a valid prompt object");
+      ret = OB_ERR_INVALID_TYPE_FOR_OP;
     } else {
       ObJsonObject *inner_object = static_cast<ObJsonObject *>(j_base);
       ObJsonString *inner_template = static_cast<ObJsonString *>(
@@ -142,14 +140,9 @@ int ObExprAIPrompt::eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
     }
   } else if (OB_FAIL(tmp_allocator.eval_arg(template_expr, ctx, template_datum))) {
   } else if (template_datum->is_null()) {
-    ret = OB_INVALID_ARGUMENT;
+    ret = OB_ERR_INVALID_TYPE_FOR_OP;
   } else if (OB_FAIL(ObTextStringHelper::read_real_string_data(ctx.exec_ctx_, tmp_allocator, *template_datum,
                    template_expr->datum_meta_, template_expr->obj_meta_.has_lob_header(), template_str))) {
-  }
-
-  if (OB_SUCC(ret) && template_str.empty()) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt, the template is empty");
   }
 
   if (OB_FAIL(ret)) {
@@ -171,12 +164,11 @@ int ObExprAIPrompt::eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
         bool is_null = false;
         if (OB_FAIL(ObJsonExprHelper::get_json_doc(expr, ctx, tmp_allocator, i, j_base, is_null))) {
         } else if (OB_ISNULL(j_base)) {
-          ret = OB_INVALID_ARGUMENT;
-          LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt, the argument is null");
+          ret = OB_ERR_INVALID_TYPE_FOR_OP;
         } else if (j_base->json_type() != ObJsonNodeType::J_OBJECT
-                   && j_base->json_type() != ObJsonNodeType::J_ARRAY) {
-          ret = OB_INVALID_ARGUMENT;
-          LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt, the argument is neither a json array nor a json object");
+                   && j_base->json_type() != ObJsonNodeType::J_ARRAY
+                   && j_base->json_type() != ObJsonNodeType::J_STRING) {
+          ret = OB_ERR_INVALID_TYPE_FOR_OP;
         } else if (OB_FAIL(ObAIFuncPromptObjectUtils::append_arg_node(tmp_allocator, args_array, j_base))) {
         }
       } else if (OB_FAIL(tmp_allocator.eval_arg(arg, ctx, datum))) {
