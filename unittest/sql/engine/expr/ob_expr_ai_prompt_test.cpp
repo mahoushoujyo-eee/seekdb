@@ -308,12 +308,6 @@ TEST_F(TestObExprAIPrompt, illegal_placeholder_index)
   EXPECT_EQ(OB_INVALID_ARGUMENT,
             ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(
                 allocator_, prompt_object, replaced));
-  EXPECT_EQ(OB_INVALID_ARGUMENT,
-            ObAIFuncPromptObjectUtils::check_placeholders(ObString("{3}"), 1));
-  EXPECT_EQ(OB_SUCCESS,
-            ObAIFuncPromptObjectUtils::check_placeholders(ObString("{0}"), 1));
-  EXPECT_EQ(OB_SUCCESS,
-            ObAIFuncPromptObjectUtils::check_placeholders(ObString("no placeholder"), 0));
 }
 
 // The prompt object is built out of a template and its arguments.

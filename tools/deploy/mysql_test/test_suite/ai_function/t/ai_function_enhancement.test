@@ -115,9 +115,11 @@ select id, ai_prompt(t, 'x') from t_ai_prompt order by id;
 select id, ai_prompt(lt, 'x') from t_ai_prompt order by id;
 drop table t_ai_prompt;
 
-### ai_prompt: an illegal placeholder index is an error
---error 1210
+### ai_prompt: a template with a placeholder that has no argument is built, the
+### error shows up when the prompt is resolved
 select ai_prompt('{5}', 'x');
+--error 1210
+select ai_complete('mock_complete_model', ai_prompt('{5}', 'x'));
 
 ### ai_complete: the openai protocol, a json config and a null config
 select ai_complete('mock_complete_model', 'hello');
