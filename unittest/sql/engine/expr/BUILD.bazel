@@ -1,9 +1,9 @@
-load("//bazel:defs.bzl", "cc_library")
+load("//bazel:defs.bzl", "seekdb_cc_library")
 load("//bazel:seekdb_cc_test.bzl", "seekdb_cc_test")
 
 package(default_testonly = True)
 
-cc_library(
+seekdb_cc_library(
     name = "ob_expr_ai_prompt_cases",
     srcs = ["ob_expr_ai_prompt_test.cpp"],
     alwayslink = True,
@@ -21,7 +21,7 @@ seekdb_cc_test(
     visibility = ["//visibility:private"],
 )
 
-cc_library(
+seekdb_cc_library(
     name = "ob_openai_utils_cases",
     srcs = ["test_ob_openai_utils.cpp"],
     alwayslink = True,
