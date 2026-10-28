@@ -166,7 +166,12 @@ int ObExprAIRerank::eval_ai_rerank(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
     bool is_null_result = false;
     // A null document key means that the documents are plain strings, the
     // caller did not name a field of the documents.
-    bool has_doc_key = OB_NOT_NULL(arg_doc_key) && !arg_doc_key->is_null();
+    // A SQL NULL document key selects the plain string-document protocol.
+    // Keep the expression type check as well because a NULL datum can still
+    // be materialized for a nullable string expression.
+    bool has_doc_key = OB_NOT_NULL(arg_doc_key)
+                       && !arg_doc_key->is_null()
+                       && expr.args_[DOC_KEY_IDX]->datum_meta_.type_ != ObNullType;
     if (OB_FAIL(ObJsonExprHelper::get_json_doc(expr, ctx, temp_allocator, DOCUMENTS_IDX,
           j_base, is_null_result))) {
     } else if (OB_ISNULL(j_base)) {
