@@ -25,10 +25,30 @@
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
 
-namespace oceanbase 
+namespace oceanbase
 {
-namespace sql 
+namespace sql
 {
+
+namespace
+{
+// A json number that is not negative is parsed into an unsigned node, so both
+// kinds have to be read.
+inline bool get_json_int_value(ObJsonNode *node, int64_t &value)
+{
+  bool ok = false;
+  if (OB_NOTNULL(node)) {
+    if (node->json_type() == ObJsonNodeType::J_INT) {
+      value = static_cast<ObJsonInt *>(node)->value();
+      ok = true;
+    } else if (node->json_type() == ObJsonNodeType::J_UINT) {
+      value = static_cast<int64_t>(static_cast<ObJsonUint *>(node)->value());
+      ok = true;
+    }
+  }
+  return ok;
+}
+} // namespace
 
 ObExprAIRerank::ObExprAIRerank(common::ObIAllocator &alloc)
 : ObFuncExprOperator(alloc, 
@@ -305,12 +325,16 @@ int ObExprAIRerank::sort_document_array_by_model_result(ObIAllocator &allocator,
         ObJsonObject *model_result_obj = static_cast<ObJsonObject *>(model_result_node);
         ObJsonNode *index_node = model_result_obj->get_value(INDEX_KEY);
         ObJsonNode *score_node = model_result_obj->get_value(SCORE_KEY);
-        if (OB_ISNULL(index_node) || index_node->json_type() != ObJsonNodeType::J_INT
+        int64_t index = 0;
+        if (!get_json_int_value(index_node, index)
             || OB_ISNULL(score_node) || !share::ObJsonHelper::is_number_type(score_node)) {
           ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("ai_rerank, the answer of the model holds no index or score",
+                   K(index_node == nullptr), K(index_node == nullptr ? -1 : index_node->json_type()),
+                   K(score_node == nullptr), K(score_node == nullptr ? -1 : score_node->json_type()),
+                   K(count), K(document_array->element_count()));
           LOG_USER_ERROR(OB_ERR_UNEXPECTED, "ai_rerank, the answer of the model holds no index or score");
         } else {
-          int64_t index = static_cast<ObJsonInt *>(index_node)->value();
           if (index < 0 || index >= document_array->element_count()) {
             // The model reported an index that does not belong to the request.
             ret = OB_INVALID_DATA;
