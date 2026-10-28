@@ -37,7 +37,7 @@ namespace
 inline bool get_json_int_value(ObJsonNode *node, int64_t &value)
 {
   bool ok = false;
-  if (OB_NOTNULL(node)) {
+  if (OB_NOT_NULL(node)) {
     if (node->json_type() == ObJsonNodeType::J_INT) {
       value = static_cast<ObJsonInt *>(node)->value();
       ok = true;
@@ -330,8 +330,10 @@ int ObExprAIRerank::sort_document_array_by_model_result(ObIAllocator &allocator,
             || OB_ISNULL(score_node) || !share::ObJsonHelper::is_number_type(score_node)) {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("ai_rerank, the answer of the model holds no index or score",
-                   K(index_node == nullptr), K(index_node == nullptr ? -1 : index_node->json_type()),
-                   K(score_node == nullptr), K(score_node == nullptr ? -1 : score_node->json_type()),
+                   K(index_node == nullptr),
+                   K(index_node == nullptr ? -1 : static_cast<int>(index_node->json_type())),
+                   K(score_node == nullptr),
+                   K(score_node == nullptr ? -1 : static_cast<int>(score_node->json_type())),
                    K(count), K(document_array->element_count()));
           LOG_USER_ERROR(OB_ERR_UNEXPECTED, "ai_rerank, the answer of the model holds no index or score");
         } else {
