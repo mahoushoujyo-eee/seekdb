@@ -59,7 +59,7 @@ inline ObJsonNode *find_member(ObJsonObject *obj, const ObString &key)
     for (int64_t i = 0; i < obj->element_count(); i++) {
       ObString member_key;
       ObJsonNode *value = nullptr;
-      if (OB_SUCC(obj->get_value_by_idx(i, member_key, value)) && member_key == key) {
+      if (OB_SUCCESS == obj->get_value_by_idx(i, member_key, value) && member_key == key) {
         found = value;
         break;
       }
