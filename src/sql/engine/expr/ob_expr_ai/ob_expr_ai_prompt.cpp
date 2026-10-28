@@ -195,8 +195,6 @@ int ObExprAIPrompt::eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
   }
 
   if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(ObAIFuncPromptObjectUtils::check_placeholders(
-                       template_str, args_array->element_count()))) {
   } else if (OB_FAIL(ObAIFuncPromptObjectUtils::construct_prompt_object(tmp_allocator, template_str, args_array, prompt_object))) {
   } else {
     ObString raw_str;
