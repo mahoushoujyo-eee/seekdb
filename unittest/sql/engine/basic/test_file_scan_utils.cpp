@@ -71,7 +71,7 @@ TEST(TestFileScanUtils, parses_multiline_crlf_and_escaped_quotes)
 
   ASSERT_EQ(OB_SUCCESS, reader.next(record, has_record));
   ASSERT_TRUE(has_record);
-  EXPECT_EQ("hello,\r\nworld", record.fields_[1].value_);
+  EXPECT_EQ("hello,\nworld", record.fields_[1].value_);
 
   ASSERT_EQ(OB_SUCCESS, reader.next(record, has_record));
   ASSERT_TRUE(has_record);

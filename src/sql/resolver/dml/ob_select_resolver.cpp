@@ -2991,6 +2991,8 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
   int ret = OB_SUCCESS;
   bool has_format_type = false;
   bool has_cs_type = false;
+  bool has_field_delimiter = false;
+  bool has_field_quote = false;
   ObExternalFileFormat external_format;
   ParseNode* format_node = NULL;
   ParseNode* option_node = NULL;
@@ -3009,6 +3011,9 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
         has_format_type |= (T_EXTERNAL_FILE_FORMAT_TYPE == option_node->type_);
         has_cs_type |= (T_CHARSET == option_node->type_);
       }
+      has_field_delimiter |= (T_FIELD_TERMINATED_STR == option_node->type_);
+      has_field_quote |= (T_OPTIONALLY_CLOSED_STR == option_node->type_
+                          || T_CLOSED_STR == option_node->type_);
     }
     if (OB_FAIL(ret)) {
     } else if (!has_format_type) {
@@ -3022,6 +3027,14 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
                                      ? ObCharset::get_default_collation(external_format.csv_format_.cs_type_)
                                      : ObCharset::get_system_collation();
       if (OB_FAIL(external_format.csv_format_.init_format(ObDataInFileStruct(), 0, file_cs_type))) {
+      } else if (node->value_ == 1) {
+        if (!has_field_delimiter) {
+          external_format.csv_format_.field_term_str_.assign_ptr(const_cast<char *>(","), 1);
+        }
+        if (!has_field_quote) {
+          external_format.csv_format_.field_enclosed_char_ = '"';
+          external_format.csv_format_.is_optional_ = true;
+        }
       }
     }
     for (int i = 0; OB_SUCC(ret) && i < format_node->num_child_; ++i) {
@@ -3034,6 +3047,10 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
     }
     if (OB_SUCC(ret)
         && OB_FAIL(external_format.to_string_with_alloc(into_item.external_properties_, *allocator_, true))) {
+    }
+    if (OB_SUCC(ret) && node->value_ == 1) {
+      into_item.is_copy_ = true;
+      into_item.has_header_ = external_format.csv_format_.parse_header_;
     }
   }
   // file: single, max_file_size, buffer_size
@@ -3128,6 +3145,15 @@ int ObSelectResolver::resolve_into_clause(const ParseNode *node)
         }
       } else {
         //do nothing
+      }
+      if (OB_SUCC(ret) && into_item->is_copy_ && into_item->has_header_) {
+        for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt->get_select_item_size(); ++i) {
+          ObString column_name;
+          const ObString &alias_name = select_stmt->get_select_item(i).alias_name_;
+          if (OB_FAIL(ob_write_string(*allocator_, alias_name, column_name))) {
+          } else if (OB_FAIL(into_item->column_names_.push_back(column_name))) {
+          }
+        }
       }
       if (OB_SUCC(ret)) {
         select_stmt->set_select_into(into_item);

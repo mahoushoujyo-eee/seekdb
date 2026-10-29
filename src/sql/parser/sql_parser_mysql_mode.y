@@ -25,6 +25,7 @@
 #include "parse_node.h"
 }
 %{
+#include <errno.h>
 #include <stdint.h>
 #define YYDEBUG 1
 %}
@@ -47,6 +48,9 @@
   ParseNode *display_node = NULL; \
   if (0 != explain_type) { \
     malloc_terminal_node(type_node, result->malloc_pool_, explain_type); \
+  } else if (NULL != no_use && no_use->value_ == 1) { \
+    malloc_terminal_node(type_node, result->malloc_pool_, T_INT); \
+    type_node->value_ = 1; \
   } \
   if (0 != display_type) { \
     malloc_terminal_node(display_node, result->malloc_pool_, display_type); \
@@ -398,11 +402,12 @@ END_P SET_VAR DELIMITER
 %type <node> table_element_list table_element column_definition column_definition_ref column_definition_list column_name_list
 %type <node> file_table_function_expr table_function_arguments table_function_argument_list table_function_argument
 %type <node> opt_generated_keyname opt_generated_option_list opt_generated_column_attribute_list generated_column_attribute opt_storage_type
-%type <node> ai_column_option_list ai_column_option
+%type <node> ai_column_option_list ai_column_option opt_ai_column_options
 %type <node> data_type special_table_type opt_if_not_exists opt_if_exists opt_charset collation opt_collation cast_data_type
 %type <node> replace_with_opt_hint insert_with_opt_hint column_list opt_on_duplicate_key_clause opt_into opt_replace opt_temporary no_param_column_ref
 %type <node> insert_vals_list insert_vals value_or_values opt_insert_row_alias
 %type <node> select_with_parens select_no_parens select_clause select_into no_table_select_with_order_and_limit simple_select_with_order_and_limit select_with_parens_with_order_and_limit select_clause_set_with_order_and_limit
+%type <node> copy_stmt copy_option_list copy_option
 %type <node> simple_select no_table_select limit_clause select_expr_list opt_approx
 %type <node> with_select with_clause with_list common_table_expr opt_column_alias_name_list alias_name_list column_alias_name
 %type <node> opt_where opt_hint_value opt_groupby opt_rollup opt_order_by order_by opt_having groupby_clause order_by_opt_null
@@ -560,6 +565,7 @@ opt_end_p:
 /* only preparable statement will set question mark size */
 stmt:
     select_stmt             { $$ = $1; question_mark_issue($$, result); }
+  | copy_stmt               { $$ = $1; question_mark_issue($$, result); }
   | insert_stmt             { $$ = $1; question_mark_issue($$, result); }
   | create_table_stmt       {
     $$ = $1;
@@ -667,6 +673,67 @@ stmt:
     }
   }
   ;
+
+/* COPY query TO path is represented as SELECT ... INTO OUTFILE so it uses
+ * the normal seekdb query plan and CSV writer. */
+copy_stmt:
+COPY '(' select_no_parens ')' TO STRING_VALUE '(' copy_option_list ')'
+{
+  ParseNode *format_list = NULL;
+  merge_nodes(format_list, result, T_EXTERNAL_FILE_FORMAT, $8);
+  ParseNode *into_node = NULL;
+  malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3, $6, format_list, NULL);
+  into_node->value_ = 1;
+  $3->children_[PARSE_SELECT_INTO_EXTRA] = into_node;
+  $$ = $3;
+}
+;
+
+copy_option_list:
+copy_option
+{
+  $$ = $1;
+}
+| copy_option_list ',' copy_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+copy_option:
+FORMAT NAME_OB
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT_TYPE, 1, $2);
+}
+| NAME_OB
+{
+  if (0 != strcasecmp($1->str_value_, "header")) {
+    yyerror(&@1, result, "unsupported COPY option");
+    YYERROR;
+  }
+  ParseNode *value_node = NULL;
+  malloc_terminal_node(value_node, result->malloc_pool_, T_BOOL);
+  value_node->value_ = 1;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_PARSE_HEADER, 1, value_node);
+}
+| NAME_OB text_string
+{
+  if (0 == strcasecmp($1->str_value_, "nullstr")) {
+    ParseNode *value_list = NULL;
+    malloc_list_node(value_list, result->malloc_pool_, T_EXPR_LIST, 2, 1, $2);
+    malloc_non_terminal_node($$, result->malloc_pool_, T_NULL_IF_EXETERNAL, 1, value_list);
+  } else if (0 == strcasecmp($1->str_value_, "delimiter")) {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_FIELD_TERMINATED_STR, 1, $2);
+  } else if (0 == strcasecmp($1->str_value_, "quote")) {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_OPTIONALLY_CLOSED_STR, 1, $2);
+  } else if (0 == strcasecmp($1->str_value_, "escape")) {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_ESCAPED_STR, 1, $2);
+  } else {
+    yyerror(&@1, result, "unsupported COPY option");
+    YYERROR;
+  }
+}
+;
 
 /*****************************************************************************
 *
@@ -4844,12 +4911,13 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   set_data_type_collation($2, attributes, false, true);
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 4, $1, $2, attributes, $5);
 }
-| column_definition_ref data_type opt_collation AI COLUMN '(' expr ')' WITH '(' ai_column_option_list ')' opt_column_reference opt_position_column
+| column_definition_ref data_type opt_collation AI COLUMN '(' expr ')' opt_ai_column_options opt_column_reference opt_position_column
 {
   (void)($4);
   (void)($5);
+  (void)($9);
   (void)($10);
-  (void)($14);
+  (void)($11);
   ParseNode *attributes = NULL;
   ParseNode *ai_marker = NULL;
   set_data_type_collation($2, $3, true, false);
@@ -4861,7 +4929,7 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   malloc_terminal_node(ai_marker, result->malloc_pool_, T_GENERATED_COLUMN);
   ai_marker->value_ = 1;
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 7,
-                           $1, $2, attributes, $7, ai_marker, $14, $12);
+                           $1, $2, attributes, $7, ai_marker, $11, $9);
 }
 | column_definition_ref data_type opt_collation opt_generated_keyname AS '(' expr ')' opt_storage_type opt_generated_column_attribute_list opt_column_reference opt_position_column
 {
@@ -5024,9 +5092,21 @@ ai_column_option
 }
 ;
 
+opt_ai_column_options:
+WITH '(' ai_column_option_list ')'
+{
+  $$ = $3;
+}
+| /* EMPTY */
+{
+  $$ = NULL;
+}
+;
+
 ai_column_option:
 relation_name opt_equal_mark literal
 {
+  (void)($2);
   malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
 }
 ;
@@ -12354,9 +12434,21 @@ explain_or_desc relation_factor opt_desc_column_option
 ;
 
 explain_or_desc:
-EXPLAIN {$$ = NULL;}
-| DESCRIBE {$$ = NULL;}
-| DESC  {$$ = NULL;}
+EXPLAIN
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 0;
+}
+| DESCRIBE
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 1;
+}
+| DESC
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 1;
+}
 ;
 
 explainable_stmt:

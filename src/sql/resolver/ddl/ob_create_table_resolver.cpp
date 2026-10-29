@@ -896,6 +896,11 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       }
     }
 
+    if (OB_SUCC(ret) && RESOLVE_NON_COL != resolve_rule) {
+      if (OB_FAIL(add_ai_column_hidden_columns(table_schema))) {
+      }
+    }
+
     // A table must have at least one column as a visible column
     if (OB_SUCC(ret)) {
       // RESOLVE_NON_COL == resolve_rule when, only parse non-column definitions
@@ -950,6 +955,46 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       } else if (OB_FAIL(resolve_primary_key_node_in_heap_table(primary_node_in_heap_table, stats, resolved_cols))) {
       }
     }
+  }
+  return ret;
+}
+
+int ObCreateTableResolver::add_ai_column_hidden_columns(ObTableSchema &table_schema)
+{
+  int ret = OB_SUCCESS;
+  const int64_t user_column_count = table_schema.get_column_count();
+  for (int64_t i = 0; OB_SUCC(ret) && i < user_column_count; ++i) {
+    const ObColumnSchemaV2 *ai_column = table_schema.get_column_schema_by_idx(i);
+    if (OB_ISNULL(ai_column) || !ai_column->is_ai_column()) {
+      continue;
+    }
+    const uint64_t base_id = ai_column->get_column_id();
+    const char *suffixes[] = {"state", "request", "result_spec"};
+    const ObObjType types[] = {ObIntType, ObVarcharType, ObLongTextType};
+    for (int64_t j = 0; OB_SUCC(ret) && j < 3; ++j) {
+      char name_buf[OB_MAX_COLUMN_NAME_LENGTH];
+      const int32_t name_len = snprintf(name_buf, sizeof(name_buf),
+                                        "__ai_%lu_%s", static_cast<unsigned long>(base_id), suffixes[j]);
+      if (name_len <= 0 || name_len >= static_cast<int32_t>(sizeof(name_buf))) {
+        ret = OB_SIZE_OVERFLOW;
+      } else {
+        ObColumnSchemaV2 hidden;
+        hidden.set_table_id(table_schema.get_table_id());
+        hidden.set_column_id(++cur_column_id_);
+        hidden.set_is_hidden(true);
+        hidden.set_nullable(true);
+        hidden.set_data_type(types[j]);
+        hidden.set_charset_type(table_schema.get_charset_type());
+        hidden.set_collation_type(table_schema.get_collation_type());
+        hidden.set_accuracy(types[j] == ObIntType ? ObAccuracy(0) : ObAccuracy(512));
+        if (OB_FAIL(hidden.set_column_name(ObString(name_len, name_buf)))) {
+        } else if (OB_FAIL(table_schema.add_column(hidden))) {
+        }
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    table_schema.set_max_used_column_id(cur_column_id_);
   }
   return ret;
 }

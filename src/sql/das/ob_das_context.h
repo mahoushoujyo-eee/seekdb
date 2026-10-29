@@ -86,6 +86,7 @@ public:
       flags_(0)
   {
     is_fk_cascading_ = 0;
+    is_ai_column_nested_ = 0;
     iter_uncommitted_row_ = 0;
   }
   ~ObDASCtx()
@@ -183,6 +184,7 @@ public:
                K_(history_retry_cnt),
                K_(cur_retry_cnt),
                K_(is_fk_cascading),
+               K_(is_ai_column_nested),
                K_(snapshot),
                K_(savepoint),
                K_(write_branch_id),
@@ -219,7 +221,8 @@ public:
       uint64_t iter_uncommitted_row_            : 1; //iter uncommitted row in fk_checker
       uint64_t in_das_group_scan_               : 1; //the current execution in das group scan
       uint64_t in_ignore_cascading_             : 1; //is an ignore stmt when cascading
-      uint64_t reserved_                        : 60;
+      uint64_t is_ai_column_nested_             : 1; //AI column task SQL nested in DML
+      uint64_t reserved_                        : 59;
     };
   };
 };

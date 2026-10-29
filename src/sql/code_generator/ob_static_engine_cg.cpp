@@ -5458,6 +5458,7 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
   } else if (OB_FAIL(deep_copy_obj(alloc, op.get_closed_cht(), spec.closed_cht_))) {
   } else if (OB_FAIL(deep_copy_obj(alloc, op.get_escaped_cht(), spec.escaped_cht_))) {
   } else if (OB_FAIL(spec.external_properties_.store_str(op.get_external_properties()))) {
+    } else if (OB_FAIL(spec.column_names_.init(op.get_column_names().count()))) {
   } else if (OB_FAIL(spec.user_vars_.init(op.get_user_vars().count()))) {
   } else if (OB_FAIL(spec.select_exprs_.init(op.get_select_exprs().count()))) {
   } else {
@@ -5466,6 +5467,12 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
       var.reset();
       if (OB_FAIL(ob_write_string(alloc, op.get_user_vars().at(i), var))) {
       } else if (OB_FAIL(spec.user_vars_.push_back(var))) {
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < op.get_column_names().count(); ++i) {
+      ObString column_name;
+      if (OB_FAIL(ob_write_string(alloc, op.get_column_names().at(i), column_name))) {
+      } else if (OB_FAIL(spec.column_names_.push_back(column_name))) {
       }
     }
     for (int64_t i = 0; OB_SUCC(ret) && i < op.get_select_exprs().count(); ++i) {
@@ -5486,6 +5493,7 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
       spec.cs_type_ = op.get_cs_type();
       spec.parallel_ = op.get_parallel();
       spec.is_overwrite_ = op.get_is_overwrite();
+      spec.is_copy_ = op.get_is_copy();
       spec.plan_->need_drive_dml_query_ = true;
     }
   }

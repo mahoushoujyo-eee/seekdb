@@ -709,6 +709,15 @@ int CsvReader::next(CsvRecord &record, bool &has_record)
           } else if (ch == options_.quote_) {
             in_quotes = false;
             closed_quote = true;
+          } else if (ch == '\r' && input_.peek() == '\n') {
+            input_.get();
+            ++record_bytes_;
+            if (record_bytes_ > options_.max_record_bytes_) {
+              ret = OB_SIZE_OVERFLOW;
+            } else {
+              field_value.push_back('\n');
+              ++line_number_;
+            }
           } else {
             if (ch == '\n') {
               ++line_number_;

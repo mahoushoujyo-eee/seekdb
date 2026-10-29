@@ -28,6 +28,7 @@
 #include "sql/resolver/cmd/ob_variable_set_stmt.h"
 #include "sql/resolver/cmd/ob_call_procedure_stmt.h"
 #include "sql/resolver/cmd/ob_anonymous_block_stmt.h"
+#include "sql/resolver/ddl/ob_explain_stmt.h"
 #include "sql/privilege_check/ob_privilege_check.h"
 #include "sql/rewrite/ob_transformer_impl.h"
 #include "sql/rewrite/ob_transform_pre_process.h"
@@ -38,6 +39,8 @@
 #include "sql/monitor/show_trace/ob_show_trace.h"
 #include "sql/optimizer/ob_optimizer.h"
 #include "share/rc/ob_server_runtime.h"
+#include "query/session/ob_inner_sql_connection_access.h"
+#include "common/mysqlclient/ob_mysql_proxy.h"
 
 namespace oceanbase
 {
@@ -50,6 +53,149 @@ using namespace pl;
 
 namespace sql
 {
+
+namespace
+{
+
+int append_ai_strict_identifier(ObSqlString &sql, const ObString &identifier)
+{
+  int ret = sql.append("`");
+  for (int64_t i = 0; OB_SUCC(ret) && i < identifier.length(); ++i) {
+    const char c = identifier.ptr()[i];
+    ret = c == '`' ? sql.append("``") : sql.append_fmt("%c", c);
+  }
+  if (OB_SUCC(ret)) {
+    ret = sql.append("`");
+  }
+  return ret;
+}
+
+int append_ai_strict_status_name(ObSqlString &sql, const uint64_t column_id)
+{
+  char name[64];
+  const int len = snprintf(name, sizeof(name), "__ai_%lu_state",
+                           static_cast<unsigned long>(column_id));
+  return len > 0 && len < static_cast<int>(sizeof(name))
+           ? append_ai_strict_identifier(sql, ObString(len, name))
+           : OB_SIZE_OVERFLOW;
+}
+
+int check_ai_column_strict_stmt(ObDMLStmt &stmt,
+                                ObSQLSessionInfo &session,
+                                ObSchemaGetterGuard &schema_guard)
+{
+  int ret = OB_SUCCESS;
+  int64_t strict_read = 0;
+  ObSEArray<ObDMLStmt *, 8> pending;
+  ObSEArray<uint64_t, 16> checked;
+  if (OB_FAIL(session.get_sys_variable(share::SYS_VAR_AI_COLUMN_STRICT_READ, strict_read))) {
+  } else if (strict_read == 0) {
+  } else if (OB_FAIL(pending.push_back(&stmt))) {
+  } else {
+    for (int64_t stmt_idx = 0; OB_SUCC(ret) && stmt_idx < pending.count(); ++stmt_idx) {
+      ObDMLStmt *current = pending.at(stmt_idx);
+      if (OB_ISNULL(current)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        ObSEArray<ObSelectStmt *, 8> children;
+        if (OB_FAIL(current->get_subquery_stmts(children))) {
+        } else {
+          for (int64_t i = 0; OB_SUCC(ret) && i < children.count(); ++i) {
+            if (OB_NOT_NULL(children.at(i)) && OB_FAIL(pending.push_back(children.at(i)))) {
+            }
+          }
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < current->get_column_size(); ++i) {
+          const ColumnItem *item = current->get_column_item(i);
+          const ObColumnRefRawExpr *expr = OB_NOT_NULL(item) ? item->expr_ : nullptr;
+          if (OB_ISNULL(expr)) {
+          } else {
+            const ObTableSchema *table_schema = nullptr;
+            const ObColumnSchemaV2 *column_schema = nullptr;
+            const uint64_t table_id = expr->get_table_id();
+            const uint64_t column_id = expr->get_column_id();
+            if (OB_FAIL(schema_guard.get_table_schema(table_id, table_schema))) {
+            } else if (OB_ISNULL(table_schema)
+                       || OB_ISNULL(column_schema = table_schema->get_column_schema(column_id))
+                       || !column_schema->is_ai_column()
+                       || has_exist_in_array(checked, column_id)) {
+            } else if (OB_FAIL(checked.push_back(column_id))) {
+            } else {
+              TableItem *table_item = current->get_table_item_by_id(item->table_id_);
+              if (OB_ISNULL(table_item)) {
+                table_item = current->get_table_item_by_id(table_id);
+              }
+              if (OB_ISNULL(table_item) || table_item->is_generated_table()
+                  || table_item->is_function_table()) {
+                continue;
+              }
+              ObSqlString sql;
+              if (OB_FAIL(sql.append("select count(*) from "))) {
+              } else if (OB_FAIL(append_ai_strict_identifier(sql, table_item->database_name_))) {
+              } else if (OB_FAIL(sql.append("."))) {
+              } else if (OB_FAIL(append_ai_strict_identifier(sql, table_item->table_name_))) {
+              } else if (OB_FAIL(sql.append(" where "))) {
+              } else if (OB_FAIL(append_ai_strict_status_name(sql, column_id))) {
+              } else if (OB_FAIL(sql.append(" is null or "))) {
+              } else if (OB_FAIL(append_ai_strict_status_name(sql, column_id))) {
+              } else if (OB_FAIL(sql.append(" <> 2"))) {
+              } else {
+                sqlclient::ObISQLConnectionGuard conn_guard;
+                sqlclient::ObISQLConnection *conn = nullptr;
+                ObISQLClient::ReadResult result;
+                sqlclient::ObMySQLResult *mysql_result = nullptr;
+                int64_t unfinished = 0;
+                if (OB_FAIL(query::ObInnerSQLConnectionAccess::create_connection_with_external_session(
+                                &session, conn_guard))) {
+                } else if (OB_ISNULL(conn = conn_guard.get_ptr())) {
+                  ret = OB_ERR_UNEXPECTED;
+                } else if (OB_FAIL(conn->execute_read(sql.string(), result))) {
+                } else if (OB_ISNULL(mysql_result = result.get_result())) {
+                  ret = OB_ERR_UNEXPECTED;
+                } else if (OB_FAIL(mysql_result->next())) {
+                  ret = OB_ERR_UNEXPECTED;
+                } else if (OB_FAIL(mysql_result->get_int(0, unfinished))) {
+                } else if (unfinished > 0) {
+                  ret = OB_AI_COLUMN_UNFINISHED_TASK;
+                  LOG_USER_ERROR(OB_AI_COLUMN_UNFINISHED_TASK,
+                                 static_cast<unsigned long>(table_schema->get_table_id()),
+                                 static_cast<unsigned long>(column_id));
+                }
+                if (OB_NOT_NULL(mysql_result)) {
+                  const int close_ret = result.close();
+                  if (OB_SUCCESS == ret && OB_SUCCESS != close_ret) {
+                    ret = close_ret;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int check_ai_column_strict_read(ObStmt *basic_stmt,
+                                ObSQLSessionInfo &session,
+                                ObSchemaGetterGuard &schema_guard)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(basic_stmt)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (basic_stmt->is_explain_stmt()) {
+    ObExplainStmt *explain = static_cast<ObExplainStmt *>(basic_stmt);
+    if (OB_NOT_NULL(explain->get_explain_query_stmt())) {
+      ret = check_ai_column_strict_stmt(*explain->get_explain_query_stmt(), session, schema_guard);
+    }
+  } else if (basic_stmt->is_dml_stmt()) {
+    ret = check_ai_column_strict_stmt(*static_cast<ObDMLStmt *>(basic_stmt), session, schema_guard);
+  }
+  return ret;
+}
+
+} // namespace
 
 const int64_t ObSql::max_error_length = 80;
 const int64_t ObSql::SQL_MEM_SIZE_LIMIT = 1024 * 1024 * 64;
@@ -270,19 +416,44 @@ int ObSql::fill_result_set(ObResultSet &result_set,
       break;
     }
     case stmt::T_EXPLAIN: {
-      ObString tname = ObString::make_string("explain_table");
-      ObString cname = ObString::make_string("Query Plan");
-      field.tname_ = tname;
-      field.org_tname_ = tname;
-      field.cname_ = cname;
-      field.org_cname_ = cname;
-      field.type_.set_type(ObVarcharType);
-      field.charsetnr_ = CS_TYPE_UTF8MB4_GENERAL_CI;
-      field.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
-      field.type_.set_collation_level(CS_LEVEL_IMPLICIT);
-      field.type_.set_varchar(type_name);
-      if (OB_FAIL(result_set.reserve_field_columns(1))) {
-      } else if (OB_FAIL(result_set.add_field_column(field))) {
+      const ObExplainStmt *explain_stmt = static_cast<const ObExplainStmt *>(stmt);
+      if (explain_stmt->is_describe()) {
+        static const char *const names[] = {"column_name", "column_type", "null",
+                                             "key", "default", "extra"};
+        if (OB_FAIL(result_set.reserve_field_columns(6))) {
+        } else {
+          for (int64_t i = 0; OB_SUCC(ret) && i < 6; ++i) {
+            field = ObField();
+            ObString tname = ObString::make_string("describe");
+            ObString cname = ObString::make_string(names[i]);
+            field.tname_ = tname;
+            field.org_tname_ = tname;
+            field.cname_ = cname;
+            field.org_cname_ = cname;
+            field.type_.set_type(ObVarcharType);
+            field.charsetnr_ = CS_TYPE_UTF8MB4_GENERAL_CI;
+            field.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+            field.type_.set_collation_level(CS_LEVEL_IMPLICIT);
+            field.type_.set_varchar(type_name);
+            if (OB_FAIL(result_set.add_field_column(field))) {
+            }
+          }
+        }
+      } else {
+        ObString tname = ObString::make_string("explain_table");
+        ObString cname = ObString::make_string("Query Plan");
+        field.tname_ = tname;
+        field.org_tname_ = tname;
+        field.cname_ = cname;
+        field.org_cname_ = cname;
+        field.type_.set_type(ObVarcharType);
+        field.charsetnr_ = CS_TYPE_UTF8MB4_GENERAL_CI;
+        field.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+        field.type_.set_collation_level(CS_LEVEL_IMPLICIT);
+        field.type_.set_varchar(type_name);
+        if (OB_FAIL(result_set.reserve_field_columns(1))) {
+        } else if (OB_FAIL(result_set.add_field_column(field))) {
+        }
       }
       break;
     }
@@ -1197,6 +1368,13 @@ int ObSql::handle_sql_execute(const ObString &sql,
     ret = OB_INVALID_ARGUMENT;
   } else {
     use_plan_cache = session->get_local_ob_enable_plan_cache();
+    // Strict AI-column reads depend on the current hidden state columns.  A
+    // cached plan must not bypass that check after a retry or invalidation.
+    int64_t strict_read = 0;
+    if (OB_FAIL(session->get_sys_variable(share::SYS_VAR_AI_COLUMN_STRICT_READ, strict_read))) {
+    } else if (strict_read != 0) {
+      use_plan_cache = false;
+    }
   }
 
   ObPlanCacheCtx pc_ctx(sql, mode, allocator, context, ectx);
@@ -2141,6 +2319,10 @@ int ObSql::generate_stmt(ParseResult &parse_result,
         ret = resolver.resolve(ObResolver::IS_NOT_PREPARED_STMT, tmp_node, stmt);
       } else {
         ret = resolver.resolve(ObResolver::IS_NOT_PREPARED_STMT, *parse_result.result_tree_->children_[0], stmt);
+      }
+
+      if (OB_SUCC(ret) && OB_NOT_NULL(stmt)) {
+        ret = check_ai_column_strict_read(stmt, *context.session_info_, *context.schema_guard_);
       }
 
       // set const param constraint after resolving

@@ -18,6 +18,7 @@
 #include "sql/optimizer/ob_explain_log_plan.h"
 #include "sql/optimizer/ob_log_values.h"
 #include "sql/code_generator/ob_code_generator.h"
+#include "sql/resolver/dml/ob_select_stmt.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -62,33 +63,72 @@ int ObExplainLogPlan::generate_normal_raw_plan()
       top->mark_is_plan_root();
       child_plan->get_optimizer_context().set_batch_size(batch_size);
       values_op = static_cast<ObLogValues*>(top);
-      values_op->set_explain_plan(child_plan);
-      ObSqlPlan sql_plan(get_allocator());
-      sql_plan.set_session_info(get_optimizer_context().get_session_info());
-      ObExplainLogPlan *explain_plan = static_cast<ObExplainLogPlan*>(child_plan);
-      ObSEArray<common::ObString, 64> plan_strs;
-      const ObString& into_table = explain_stmt->get_into_table();
-      const ObString& statement_id = explain_stmt->get_statement_id();
-      if (OB_FAIL(sql_plan.store_sql_plan_for_explain(get_optimizer_context().get_exec_ctx(),
-                                                      child_plan,
-                                                      explain_stmt->get_explain_type(),
-                                                      0 == into_table.length() ? "PLAN_TABLE" : into_table,
-                                                      0 == statement_id.length() ? "" : statement_id,
-                                                      explain_stmt->get_display_opt(),
-                                                      plan_strs))) {
-      } else {
-        //For explain stmt, we can do pack at the stage of expr alloc,
-        //But we need to use the FALSE flag to tell the driver 
-        //to use normal encoding instead of memcopy
-        optimizer_context_.set_packed(false);
+      const ObSelectStmt *select_stmt = dynamic_cast<const ObSelectStmt *>(child_stmt);
+      bool is_file_describe = explain_stmt->is_describe() && OB_NOT_NULL(select_stmt);
+      if (is_file_describe) {
+        bool has_file_table = false;
+        for (int64_t i = 0; i < select_stmt->get_table_size(); ++i) {
+          const TableItem *table_item = select_stmt->get_table_item(i);
+          if (OB_NOT_NULL(table_item) && table_item->is_function_table()
+              && OB_NOT_NULL(table_item->function_table_expr_)
+              && table_item->function_table_expr_->get_expr_type() == T_FILE_TABLE_FUNCTION) {
+            has_file_table = true;
+            break;
+          }
+        }
+        is_file_describe = has_file_table;
       }
-      for (int64_t i = 0; OB_SUCC(ret) && i < plan_strs.count(); ++i) {
-        ObObj obj;
-        obj.set_varchar(plan_strs.at(i));
-        ObNewRow row;
-        row.cells_ = &obj;
-        row.count_ = 1;
-        if (OB_FAIL(values_op->add_row(row))) {
+      if (is_file_describe) {
+        values_op->set_explain_plan(NULL);
+        values_op->get_row_store().reset();
+        for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt->get_select_item_size(); ++i) {
+          const SelectItem &item = select_stmt->get_select_item(i);
+          ObRawExpr *expr = item.expr_;
+          if (OB_ISNULL(expr)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            ObObj cells[6];
+            const ObString &column_name = item.is_real_alias_ ? item.alias_name_ : item.expr_name_;
+            const ObObjType obj_type = expr->get_result_type().get_type();
+            cells[0].set_varchar(column_name);
+            cells[1].set_varchar(obj_type == ObTinyIntType ? "BOOLEAN" : ob_obj_type_str(obj_type));
+            cells[2].set_varchar(expr->is_not_null_for_read() ? "NO" : "YES");
+            cells[3].set_null();
+            cells[4].set_null();
+            cells[5].set_null();
+            ObNewRow row;
+            row.cells_ = cells;
+            row.count_ = 6;
+            if (OB_FAIL(values_op->add_row(row))) {
+            }
+          }
+        }
+        optimizer_context_.set_packed(false);
+      } else {
+        values_op->set_explain_plan(child_plan);
+        ObSqlPlan sql_plan(get_allocator());
+        sql_plan.set_session_info(get_optimizer_context().get_session_info());
+        ObSEArray<common::ObString, 64> plan_strs;
+        const ObString& into_table = explain_stmt->get_into_table();
+        const ObString& statement_id = explain_stmt->get_statement_id();
+        if (OB_FAIL(sql_plan.store_sql_plan_for_explain(get_optimizer_context().get_exec_ctx(),
+                                                        child_plan,
+                                                        explain_stmt->get_explain_type(),
+                                                        0 == into_table.length() ? "PLAN_TABLE" : into_table,
+                                                        0 == statement_id.length() ? "" : statement_id,
+                                                        explain_stmt->get_display_opt(),
+                                                        plan_strs))) {
+        } else {
+          optimizer_context_.set_packed(false);
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < plan_strs.count(); ++i) {
+          ObObj obj;
+          obj.set_varchar(plan_strs.at(i));
+          ObNewRow row;
+          row.cells_ = &obj;
+          row.count_ = 1;
+          if (OB_FAIL(values_op->add_row(row))) {
+          }
         }
       }
       if (OB_SUCC(ret)) {

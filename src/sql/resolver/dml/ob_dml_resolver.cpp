@@ -4287,14 +4287,30 @@ int ObDMLResolver::resolve_file_table_function_item(const ParseNode &parse_tree,
           // numeric/date columns; ordinary schema metadata uses binary there.
           meta.set_collation_type(obj_type == ObVarcharType ? CS_TYPE_UTF8MB4_BIN : CS_TYPE_BINARY);
           meta.set_collation_level(CS_LEVEL_IMPLICIT);
+          // File-table columns are dynamically typed expressions rather than
+          // persisted schema columns.  Use normal DML display accuracy for
+          // floating point values and keep datetime output at second precision.
           accuracy = ObAccuracy::MAX_ACCURACY[obj_type];
+          if (obj_type == ObDoubleType || obj_type == ObFloatType) {
+            accuracy = ObAccuracy::DML_DEFAULT_ACCURACY[obj_type];
+          }
+          if (obj_type == ObDateTimeType) {
+            accuracy.set_scale(0);
+          }
           ColumnItem *col_item = NULL;
           ObString column_name(column.name_.length(), column.name_.c_str());
           ObString copied_column_name;
           OZ (ob_write_string(*allocator_, column_name, copied_column_name));
           OZ (resolve_function_table_column_item(*item, meta, accuracy,
-                                                  copied_column_name,
-                                                  OB_APP_MIN_COLUMN_ID + col_idx++, col_item));
+                                                 copied_column_name,
+                                                 OB_APP_MIN_COLUMN_ID + col_idx++, col_item));
+          if (OB_SUCC(ret) && OB_NOT_NULL(col_item) && OB_NOT_NULL(col_item->expr_)) {
+            if (column.nullable_) {
+              col_item->expr_->unset_result_flag(NOT_NULL_FLAG);
+            } else {
+              col_item->expr_->set_result_flag(col_item->expr_->get_result_flag() | NOT_NULL_FLAG);
+            }
+          }
         }
       }
     }

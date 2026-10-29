@@ -82,6 +82,7 @@ private:
                              common::ObArray<int> &foreign_key_node_position_list,
                              common::ObArray<int> &table_level_constraint_list,
                              const int resolve_rule);
+  int add_ai_column_hidden_columns(share::schema::ObTableSchema &table_schema);
   int resolve_insert_mode(const ParseNode *parse_tree);
   int resolve_table_elements_from_select(const ParseNode &parse_tree);
   int set_temp_table_info(share::schema::ObTableSchema &table_schema, ParseNode *commit_option_node);

@@ -1549,31 +1549,45 @@ int ObAIFuncModel::call_completion(ObString &prompt, ObJsonObject *config, ObStr
   ObJsonObject *response = nullptr;
   ObIJsonBase *result_base = nullptr;
   ObAIFuncIComplete *complete_provider = nullptr;
-  ObString prompt_str;
   ObString result_str;
   ObAIFuncClient client;
   ObString unencrypted_access_key;
   ObString request_model_name = get_request_model_name();
+  ObString system_prompt;
   if (!is_completion_type()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete, info type is not completion");
-  } else if (OB_FAIL(ObAIFuncUtils::get_complete_provider(*allocator_, endpoint_info_.get_provider(), complete_provider))) {
-  } else if (OB_FAIL(endpoint_info_.get_unencrypted_access_key(*allocator_, unencrypted_access_key))) {
-  } else if (OB_FAIL(complete_provider->get_header(*allocator_, unencrypted_access_key, headers))) {
-  } else if (OB_FAIL(complete_provider->get_body(*allocator_, request_model_name, prompt_str, prompt, config,
-                                                endpoint_info_.get_url(), body))) {
-  } else if (OB_FAIL(client.send_post(*allocator_, endpoint_info_.get_url(), headers, body, response))) {
-  } else if (OB_FAIL(complete_provider->parse_output(*allocator_, response, result_base))) {
-  } else if (OB_ISNULL(result_base)) {
-    ret = OB_INVALID_DATA;
-  } else if (result_base->json_type() == ObJsonNodeType::J_STRING
-             && static_cast<ObJsonString *>(result_base)->get_str().empty()) {
-    // The model answered but the answer carries no content.
-    ret = OB_INVALID_DATA;
-    LOG_USER_ERROR(OB_INVALID_DATA, "ai_complete, the model returned an empty answer");
-  } else if (OB_FAIL(ObAIFuncJsonUtils::print_json_to_str(*allocator_, result_base, result_str))) {
-  } else {
-    result = result_str;
+  }
+  if (OB_SUCC(ret) && OB_NOT_NULL(config) && OB_NOT_NULL(config->get_value("system_prompt"))) {
+    ObJsonNode *system_prompt_node = config->get_value("system_prompt");
+    if (system_prompt_node->json_type() != ObJsonNodeType::J_STRING) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete, system_prompt must be a string");
+    } else {
+      system_prompt = static_cast<ObJsonString *>(system_prompt_node)->get_str();
+      if (OB_FAIL(config->remove("system_prompt"))) {
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(ObAIFuncUtils::get_complete_provider(*allocator_, endpoint_info_.get_provider(), complete_provider))) {
+    } else if (OB_FAIL(endpoint_info_.get_unencrypted_access_key(*allocator_, unencrypted_access_key))) {
+    } else if (OB_FAIL(complete_provider->get_header(*allocator_, unencrypted_access_key, headers))) {
+    } else if (OB_FAIL(complete_provider->get_body(*allocator_, request_model_name, system_prompt, prompt, config,
+                                                  endpoint_info_.get_url(), body))) {
+    } else if (OB_FAIL(client.send_post(*allocator_, endpoint_info_.get_url(), headers, body, response))) {
+    } else if (OB_FAIL(complete_provider->parse_output(*allocator_, response, result_base))) {
+    } else if (OB_ISNULL(result_base)) {
+      ret = OB_INVALID_DATA;
+    } else if (result_base->json_type() == ObJsonNodeType::J_STRING
+               && static_cast<ObJsonString *>(result_base)->get_str().empty()) {
+      // The model answered but the answer carries no content.
+      ret = OB_INVALID_DATA;
+      LOG_USER_ERROR(OB_INVALID_DATA, "ai_complete, the model returned an empty answer");
+    } else if (OB_FAIL(ObAIFuncJsonUtils::print_json_to_str(*allocator_, result_base, result_str))) {
+    } else {
+      result = result_str;
+    }
   }
   if (ret == OB_INVALID_DATA) {
     ObString response_str;

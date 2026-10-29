@@ -58,6 +58,7 @@ public:
     : ObOpSpec(alloc, type),
       into_type_(T_INTO_OUTFILE),
       user_vars_(alloc),
+      column_names_(alloc),
       outfile_name_(),
       field_str_(),
       line_str_(),
@@ -71,12 +72,14 @@ public:
       parallel_(1),
       buffer_size_(DEFAULT_BUFFER_SIZE),
       is_overwrite_(false),
-      external_properties_(alloc)
+      external_properties_(alloc),
+      is_copy_(false)
   {
   }
 
   ObItemType into_type_;
   common::ObFixedArray<common::ObString, common::ObIAllocator> user_vars_;
+  common::ObFixedArray<common::ObString, common::ObIAllocator> column_names_;
   common::ObObj outfile_name_;
   common::ObObj field_str_;
   common::ObObj line_str_;
@@ -91,6 +94,7 @@ public:
   int64_t buffer_size_;
   bool is_overwrite_;
   ObExternalFileFormat::StringData external_properties_;
+  bool is_copy_;
   static const int64_t DEFAULT_MAX_FILE_SIZE = 256LL * 1024 * 1024;
   static const int64_t DEFAULT_BUFFER_SIZE = 1LL * 1024 * 1024;
 };
@@ -198,6 +202,7 @@ private:
   int init_env_common();
   int init_csv_env();
   void set_csv_format_options();
+  int write_header(ObCsvFileWriter &data_writer);
 
   int get_row_str(const int64_t buf_len, bool is_first_row, char *buf, int64_t &pos);
   int into_dumpfile(ObExternalFileWriter *data_writer);

@@ -6815,6 +6815,8 @@ int ObLogPlan::allocate_select_into_as_top(ObLogicalOperator *&old_top)
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_FAIL(stmt->get_select_exprs(select_exprs))) {
     } else if (OB_FAIL(select_into->get_select_exprs().assign(select_exprs))) {
+    } else if (into_item->is_copy_ && into_item->has_header_
+               && OB_FAIL(select_into->set_column_names(into_item->column_names_))) {
     }
     if (OB_SUCC(ret)) {
       select_into->set_into_type(into_item->into_type_);
@@ -6830,6 +6832,7 @@ int ObLogPlan::allocate_select_into_as_top(ObLogicalOperator *&old_top)
       select_into->set_escaped_cht(into_item->escaped_cht_);
       select_into->set_cs_type(into_item->cs_type_);
       select_into->set_external_properties(into_item->external_properties_);
+      select_into->set_is_copy(into_item->is_copy_);
       select_into->set_child(ObLogicalOperator::first_child, old_top);
       // compute property
       if (OB_FAIL(select_into->compute_property())) {
@@ -10341,24 +10344,28 @@ int ObLogPlan::allocate_output_expr_for_values_op(ObLogicalOperator &values_op)
   if (OB_ISNULL(optimizer_context_.get_session_info())) {
     ret = OB_ERR_UNEXPECTED;
   } else {
-    // Static typing engine need expr to output rows. We generate a const output expr
-    // for values_op operator.
-    ObConstRawExpr *output = NULL;
-    if (OB_FAIL(optimizer_context_.get_expr_factory().create_raw_expr(T_VARCHAR, output))) {
-    } else {
-      ObObj v;
-      v.set_varchar(" ");
-      v.set_collation_type(ObCharset::get_system_collation());
-      output->set_value(v);
-      if (OB_FAIL(output->formalize(optimizer_context_.get_session_info()))) {
-      } else if (OB_FAIL(values_op.get_output_exprs().push_back(output))) {
+    // Static typing engine needs one const output expr per values column.
+    ObLogValues *log_values = dynamic_cast<ObLogValues *>(&values_op);
+    const int64_t column_count = OB_NOT_NULL(log_values) ? log_values->get_col_count() : 0;
+    const int64_t output_count = column_count > 0 ? column_count : 1;
+    for (int64_t i = 0; OB_SUCC(ret) && i < output_count; ++i) {
+      ObConstRawExpr *output = NULL;
+      if (OB_FAIL(optimizer_context_.get_expr_factory().create_raw_expr(T_VARCHAR, output))) {
       } else {
-        values_op.set_branch_id(0);
-        values_op.set_id(0);
-        values_op.set_op_id(0);
-        if (OB_FAIL(get_optimizer_context().get_all_exprs().append(output))) {
-        } else { /*do nothing*/ }
+        ObObj v;
+        v.set_varchar(" ");
+        v.set_collation_type(ObCharset::get_system_collation());
+        output->set_value(v);
+        if (OB_FAIL(output->formalize(optimizer_context_.get_session_info()))) {
+        } else if (OB_FAIL(values_op.get_output_exprs().push_back(output))) {
+        } else if (OB_FAIL(get_optimizer_context().get_all_exprs().append(output))) {
+        }
       }
+    }
+    if (OB_SUCC(ret)) {
+      values_op.set_branch_id(0);
+      values_op.set_id(0);
+      values_op.set_op_id(0);
     }
   }
   return ret;

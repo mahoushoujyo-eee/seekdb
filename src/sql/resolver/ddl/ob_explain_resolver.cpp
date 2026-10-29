@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/ddl/ob_explain_resolver.h"
 #include "sql/resolver/ob_resolver.h"
+#include "sql/resolver/dml/ob_select_stmt.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -67,6 +68,18 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
         ParseNode *format = parse_tree.children_[EXPLAIN_FORMAT];
         if (NULL != format) {
           switch (format->type_) {
+          case T_INT:
+            if (format->value_ == 1 && child_stmt->is_select_stmt()) {
+              const ObSelectStmt *select_stmt = static_cast<const ObSelectStmt *>(child_stmt);
+              for (int64_t i = 0; !explain_stmt->is_describe() && i < select_stmt->get_table_size(); ++i) {
+                const TableItem *table_item = select_stmt->get_table_item(i);
+                explain_stmt->set_is_describe(
+                    OB_NOT_NULL(table_item) && table_item->is_function_table()
+                    && OB_NOT_NULL(table_item->function_table_expr_)
+                    && table_item->function_table_expr_->get_expr_type() == T_FILE_TABLE_FUNCTION);
+              }
+            }
+            break;
           case T_OUTLINE:
           {
             explain_stmt->set_explain_format(EXPLAIN_OUTLINE);

@@ -1762,6 +1762,123 @@ int ObDDLResolver::resolve_column_name(ObColumnSchemaV2 &column,
   return ret;
 }
 
+static int collect_ai_column_options(ParseNode *node, ObColumnSchemaV2 &column)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(node)) {
+  } else if (node->type_ == T_LINK_NODE && node->num_child_ == 2
+             && node->children_[0] != NULL && node->children_[1] != NULL
+             && (node->children_[0]->type_ == T_IDENT
+                 || node->children_[0]->type_ == T_SIMPLE_IDENT)) {
+    ParseNode *name_node = node->children_[0];
+    ParseNode *value_node = node->children_[1];
+    char option_buf[128];
+    int32_t pos = 0;
+    const ObString option_name(name_node->str_len_, name_node->str_value_);
+    if (0 == option_name.case_compare("max_retries")) {
+      if (value_node->type_ != T_INT || value_node->value_ < 0 || value_node->value_ > 100) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "AI COLUMN max_retries must be between 0 and 100");
+      }
+    } else if (0 == option_name.case_compare("sync_mode")) {
+      if (value_node->str_value_ == NULL || value_node->str_len_ != 5
+          || 0 != strncasecmp(value_node->str_value_, "async", 5)) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "AI COLUMN only supports sync_mode='async'");
+      }
+    } else {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "unknown AI COLUMN option");
+    }
+    if (OB_FAIL(ret)) {
+    } else if (value_node->type_ == T_INT) {
+      pos = snprintf(option_buf, sizeof(option_buf), "%.*s=%ld",
+                     name_node->str_len_, name_node->str_value_, value_node->value_);
+    } else {
+      pos = snprintf(option_buf, sizeof(option_buf), "%.*s=%.*s",
+                     name_node->str_len_, name_node->str_value_,
+                     value_node->str_len_, value_node->str_value_);
+    }
+    if (pos <= 0 || pos >= static_cast<int32_t>(sizeof(option_buf))) {
+      ret = OB_SIZE_OVERFLOW;
+    } else {
+      ret = column.add_type_info(ObString(pos, option_buf));
+    }
+  } else if (node->type_ == T_LINK_NODE && node->num_child_ == 2) {
+    if (OB_FAIL(collect_ai_column_options(node->children_[0], column))) {
+    } else if (OB_FAIL(collect_ai_column_options(node->children_[1], column))) {
+    }
+  }
+  return ret;
+}
+
+static int check_ai_embed_dimension(const ParseNode *expr_node,
+                                    const ObColumnSchemaV2 &column)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(expr_node) || !column.is_collection()
+      || expr_node->type_ != T_FUN_SYS || expr_node->num_child_ < 2
+      || OB_ISNULL(expr_node->children_)
+      || OB_ISNULL(expr_node->children_[0])
+      || OB_ISNULL(expr_node->children_[1])) {
+    return ret;
+  }
+  const ParseNode *name_node = expr_node->children_[0];
+  const ObString function_name(name_node->str_len_, name_node->str_value_);
+  if (0 != function_name.case_compare("AI_EMBED")) {
+    return ret;
+  }
+  const ParseNode *args = expr_node->children_[1];
+  if (args->type_ != T_EXPR_LIST || args->num_child_ < 3
+      || OB_ISNULL(args->children_) || OB_ISNULL(args->children_[2])
+      || args->children_[2]->type_ != T_INT) {
+    return ret;
+  }
+  const ObIArray<ObString> &type_info = column.get_extended_type_info();
+  int64_t expected_dim = 0;
+  if (!type_info.empty()) {
+    const ObString &definition = type_info.at(0);
+    if (definition.length() > 8
+        && 0 == strncasecmp(definition.ptr(), "VECTOR(", 7)) {
+      expected_dim = strtoll(definition.ptr() + 7, nullptr, 10);
+    }
+  }
+  const int64_t requested_dim = args->children_[2]->value_;
+  if (expected_dim > 0 && requested_dim != expected_dim) {
+    ret = OB_ERR_INVALID_VECTOR_DIM;
+    LOG_USER_ERROR(OB_ERR_INVALID_VECTOR_DIM,
+                   static_cast<uint32_t>(expected_dim),
+                   static_cast<uint32_t>(requested_dim));
+  }
+  return ret;
+}
+
+static bool ai_expr_references_ai_column(const ParseNode *expr_node,
+                                         const ObTableSchema &table_schema)
+{
+  bool found = false;
+  if (OB_ISNULL(expr_node) || OB_ISNULL(expr_node->str_value_) || expr_node->str_len_ <= 0) {
+    return found;
+  }
+  const ObString expression(expr_node->str_len_, expr_node->str_value_);
+  for (auto iter = table_schema.column_begin(); !found && iter != table_schema.column_end(); ++iter) {
+    const ObColumnSchemaV2 *column = *iter;
+    const ObString &name = OB_NOT_NULL(column) ? column->get_column_name_str() : ObString();
+    if (OB_NOT_NULL(column) && column->is_ai_column() && !name.empty()
+        && expression.length() >= name.length()) {
+      for (int64_t pos = 0; !found && pos + name.length() <= expression.length(); ++pos) {
+        if (0 == strncasecmp(expression.ptr() + pos, name.ptr(), name.length())) {
+          const bool left_ok = pos == 0 || !(isalnum(expression.ptr()[pos - 1]) || expression.ptr()[pos - 1] == '_');
+          const int64_t end = pos + name.length();
+          const bool right_ok = end == expression.length() || !(isalnum(expression.ptr()[end]) || expression.ptr()[end] == '_');
+          found = left_ok && right_ok;
+        }
+      }
+    }
+  }
+  return found;
+}
+
 int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
                                              ParseNode *node, /* column_definition */
                                              ObColumnResolveStat &resolve_stat,
@@ -1883,6 +2000,9 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
     ParseNode *expr_node = NULL;
     if (OB_ISNULL(expr_node = node->children_[3])) {
       ret = OB_ERR_UNEXPECTED;
+    } else if (is_ai_column && ai_expr_references_ai_column(expr_node, table_schema)) {
+      ret = OB_NOT_SUPPORTED;
+    } else if (is_ai_column && OB_FAIL(check_ai_embed_dimension(expr_node, column))) {
     } else {
       ObString expr_str(expr_node->str_len_, expr_node->str_value_);
       ObObj default_value;
@@ -1913,6 +2033,8 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
            * trying to insert the prompt text into the result column. */
           if (OB_FAIL(column.add_type_info(expr_str))) {
           } else {
+            if (OB_FAIL(collect_ai_column_options(node->children_[6], column))) {
+            }
             ObObj null_value;
             null_value.set_null();
             if (OB_FAIL(column.set_cur_default_value(null_value, false))) {

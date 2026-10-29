@@ -21,6 +21,8 @@
 #include "query/session/ob_inner_sql_connection_access.h"
 #include "sql/engine/ob_physical_plan.h"
 #include "sql/engine/dml/ob_dml_service.h"
+#include "sql/ob_sql_utils.h"
+#include "share/schema/ob_schema_getter_guard.h"
 
 namespace oceanbase
 {
@@ -645,6 +647,25 @@ int ObTableModifyOp::inner_open()
     init_das_dml_ctx();
   }
   return ret;
+}
+
+bool ObTableModifyOp::need_after_row_process(const ObDMLBaseCtDef &dml_ctdef)
+{
+  bool need_process = need_foreign_key_check(dml_ctdef) || has_after_row_trigger(dml_ctdef);
+  if (!need_process && dml_ctdef.is_primary_index_ && !ObSQLUtils::is_nested_sql(&ctx_)) {
+    ObSqlCtx *sql_ctx = ctx_.get_sql_ctx();
+    ObSchemaGetterGuard *schema_guard = OB_NOT_NULL(sql_ctx) ? sql_ctx->schema_guard_ : nullptr;
+    const ObTableSchema *table_schema = nullptr;
+    if (OB_NOT_NULL(schema_guard)
+        && OB_SUCCESS == schema_guard->get_table_schema(dml_ctdef.das_base_ctdef_.index_tid_, table_schema)
+        && OB_NOT_NULL(table_schema)) {
+      for (auto iter = table_schema->column_begin(); !need_process && iter != table_schema->column_end(); ++iter) {
+        const ObColumnSchemaV2 *column = *iter;
+        need_process = OB_NOT_NULL(column) && column->is_ai_column();
+      }
+    }
+  }
+  return need_process;
 }
 
 void ObTableModifyOp::clear_dml_evaluated_flag(ObExpr *clear_expr)

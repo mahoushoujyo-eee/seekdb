@@ -24,6 +24,7 @@
 #include "sql/privilege_check/ob_ai_model_priv_util.h"
 #include "share/ob_server_struct.h"
 #include "lib/worker.h"
+#include "lib/task/ob_timer.h"
 
 namespace oceanbase
 {
@@ -43,21 +44,44 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObAiServiceGuard);
 };
 
-class ObAiService
+class ObAiService : public common::ObTimerTask
 {
 public:
   ObAiService();
   virtual ~ObAiService();
   static int server_module_init(ObAiService* &ai_service);
   int init();
-  int start() { return OB_SUCCESS; }
-  void stop() {};
-  void wait() {};
+  int start();
+  void stop();
+  void wait();
   void destroy();
+  virtual void runTimerTask() override;
 public:
   int get_ai_service_guard(ObAiServiceGuard &ai_service_guard);
 private:
+  struct AiColumnTaskInfo
+  {
+    uint64_t task_id_;
+    uint64_t table_id_;
+    uint64_t column_id_;
+    int64_t retry_count_;
+    int64_t max_retries_;
+    common::ObString request_id_;
+    common::ObString rowkey_predicate_;
+    common::ObString database_name_;
+    common::ObString table_name_;
+    common::ObString column_name_;
+    common::ObString expression_;
+    uint64_t state_column_id_;
+    uint64_t request_column_id_;
+  };
+  int process_tasks_();
+  int process_task_group_(const common::ObIArray<AiColumnTaskInfo> &tasks,
+                          const int64_t begin_idx,
+                          const int64_t end_idx);
+  common::ObTimer timer_;
   bool is_inited_;
+  int64_t is_processing_;
   DISALLOW_COPY_AND_ASSIGN(ObAiService);
 };
 
