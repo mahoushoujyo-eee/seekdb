@@ -4223,8 +4223,8 @@ int ObDMLResolver::resolve_file_table_function_item(const ParseNode &parse_tree,
           if (OB_FAIL(file_sql::infer_jsonl_schema(path, json_options, columns))) {
           }
         } else if (func_name.case_compare("read_parquet") == 0) {
-          ret = OB_NOT_SUPPORTED;
-          LOG_USER_ERROR(OB_NOT_SUPPORTED, "read_parquet is not available in this build");
+          if (OB_FAIL(file_sql::infer_parquet_schema(path, columns))) {
+          }
         } else {
           ret = OB_ERR_FUNCTION_UNKNOWN;
         }

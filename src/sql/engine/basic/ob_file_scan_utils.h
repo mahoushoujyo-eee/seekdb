@@ -159,6 +159,36 @@ int infer_jsonl_schema(const std::string &path,
                        const JsonOptions &options,
                        std::vector<CsvColumn> &columns);
 
+struct ParquetField
+{
+  ParquetField() : is_null_(false) {}
+  std::string value_;
+  bool is_null_;
+};
+
+struct ParquetRecord
+{
+  std::vector<ParquetField> fields_;
+  int64_t row_number_;
+};
+
+class ParquetReader
+{
+public:
+  ParquetReader();
+  ~ParquetReader();
+
+  int open(const std::string &path, const std::vector<std::string> &projected_columns);
+  int next(ParquetRecord &record, bool &has_record);
+  void close();
+
+private:
+  void *impl_;
+};
+
+int infer_parquet_schema(const std::string &path,
+                         std::vector<CsvColumn> &columns);
+
 int discover_files(const std::string &pattern, std::vector<std::string> &files);
 const char *inferred_type_name(InferredType type);
 

@@ -26,6 +26,10 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <memory>
+#include <new>
+#include <sstream>
+#include <iomanip>
 #include <sys/stat.h>
 #if !defined(_WIN32)
 #include <glob.h>
@@ -1037,6 +1041,1155 @@ int discover_files(const std::string &pattern, std::vector<std::string> &files)
 #endif
   }
   return ret;
+}
+
+namespace
+{
+enum class CompactKind : uint8_t { STOP, BOOL, INTEGER, REAL, BINARY, LIST, STRUCT };
+
+struct CompactValue
+{
+  CompactValue() : kind_(CompactKind::STOP), integer_(0), boolean_(false), real_(0) {}
+  CompactKind kind_;
+  int64_t integer_;
+  bool boolean_;
+  double real_;
+  std::string binary_;
+  std::vector<CompactValue> list_;
+  std::map<int32_t, CompactValue> fields_;
+};
+
+class CompactReader
+{
+public:
+  explicit CompactReader(std::istream &input) : input_(input), consumed_(0) {}
+  int64_t consumed() const { return consumed_; }
+
+  int read_struct(CompactValue &value, int depth = 0)
+  {
+    int ret = OB_SUCCESS;
+    value.kind_ = CompactKind::STRUCT;
+    int32_t last_field = 0;
+    uint8_t header = 0;
+    while (OB_SUCC(ret)) {
+      if (OB_FAIL(read_byte(header))) {
+      } else if ((header & 0x0f) == 0) {
+        break;
+      } else if (value.fields_.size() >= 65536) {
+        ret = OB_SIZE_OVERFLOW;
+      } else {
+        const uint8_t wire_type = header & 0x0f;
+        const uint8_t delta = header >> 4;
+        int64_t field_id = 0;
+        if (delta == 0) {
+          if (OB_FAIL(read_zigzag(field_id))) {
+          }
+        } else {
+          field_id = last_field + delta;
+        }
+        if (OB_SUCC(ret) && (field_id <= 0 || field_id > INT32_MAX
+            || value.fields_.find(static_cast<int32_t>(field_id)) != value.fields_.end())) {
+          ret = OB_INVALID_DATA;
+        } else if (OB_SUCC(ret)) {
+          last_field = static_cast<int32_t>(field_id);
+          CompactValue child;
+          if (OB_FAIL(read_value(wire_type, child, depth + 1))) {
+          } else {
+            value.fields_.emplace(last_field, std::move(child));
+          }
+        }
+      }
+    }
+    return ret;
+  }
+
+private:
+  int read_byte(uint8_t &value)
+  {
+    int ret = OB_SUCCESS;
+    char byte = 0;
+    if (!input_.get(byte)) {
+      ret = OB_INVALID_DATA;
+    } else {
+      value = static_cast<uint8_t>(byte);
+      ++consumed_;
+    }
+    return ret;
+  }
+
+  int read_exact(char *buffer, size_t length)
+  {
+    int ret = OB_SUCCESS;
+    if (length > 0) {
+      input_.read(buffer, static_cast<std::streamsize>(length));
+      if (input_.gcount() != static_cast<std::streamsize>(length)) {
+        ret = OB_INVALID_DATA;
+      } else {
+        consumed_ += static_cast<int64_t>(length);
+      }
+    }
+    return ret;
+  }
+
+  int read_varint(uint64_t &value)
+  {
+    int ret = OB_SUCCESS;
+    value = 0;
+    bool done = false;
+    for (int shift = 0; OB_SUCC(ret) && !done; shift += 7) {
+      uint8_t byte = 0;
+      if (shift >= 64) {
+        ret = OB_INVALID_DATA;
+      } else if (OB_FAIL(read_byte(byte))) {
+      } else if (shift == 63 && (byte & 0xfe) != 0) {
+        ret = OB_INVALID_DATA;
+      } else {
+        value |= static_cast<uint64_t>(byte & 0x7f) << shift;
+        done = (byte & 0x80) == 0;
+      }
+    }
+    return ret;
+  }
+
+  int read_zigzag(int64_t &value)
+  {
+    uint64_t encoded = 0;
+    int ret = read_varint(encoded);
+    if (OB_SUCC(ret)) {
+      value = static_cast<int64_t>((encoded >> 1) ^ (0ULL - (encoded & 1)));
+    }
+    return ret;
+  }
+
+  int read_value(const uint8_t wire_type, CompactValue &value, const int depth)
+  {
+    int ret = OB_SUCCESS;
+    if (depth > 64) {
+      ret = OB_SIZE_OVERFLOW;
+    } else if (wire_type == 1 || wire_type == 2) {
+      value.kind_ = CompactKind::BOOL;
+      value.boolean_ = wire_type == 1;
+    } else if (wire_type == 3) {
+      uint8_t byte = 0;
+      if (OB_FAIL(read_byte(byte))) {
+      } else {
+        value.kind_ = CompactKind::INTEGER;
+        value.integer_ = static_cast<int8_t>(byte);
+      }
+    } else if (wire_type >= 4 && wire_type <= 6) {
+      value.kind_ = CompactKind::INTEGER;
+      ret = read_zigzag(value.integer_);
+    } else if (wire_type == 7) {
+      uint8_t bytes[8] = {0};
+      if (OB_FAIL(read_exact(reinterpret_cast<char *>(bytes), sizeof(bytes)))) {
+      } else {
+        uint64_t raw = 0;
+        for (int i = 7; i >= 0; --i) raw = (raw << 8) | bytes[i];
+        value.kind_ = CompactKind::REAL;
+        memcpy(&value.real_, &raw, sizeof(raw));
+      }
+    } else if (wire_type == 8) {
+      uint64_t length = 0;
+      if (OB_FAIL(read_varint(length))) {
+      } else if (length > 64 * 1024 * 1024 || length > static_cast<uint64_t>(INT64_MAX)) {
+        ret = OB_SIZE_OVERFLOW;
+      } else {
+        value.kind_ = CompactKind::BINARY;
+        value.binary_.resize(static_cast<size_t>(length));
+        ret = read_exact(value.binary_.data(), value.binary_.size());
+      }
+    } else if (wire_type == 9 || wire_type == 10) {
+      uint8_t header = 0;
+      if (OB_FAIL(read_byte(header))) {
+      } else {
+        uint64_t count = header >> 4;
+        const uint8_t element_type = header & 0x0f;
+        if (count == 15 && OB_FAIL(read_varint(count))) {
+        } else if (count > 1000000) {
+          ret = OB_SIZE_OVERFLOW;
+        } else {
+          value.kind_ = CompactKind::LIST;
+          value.list_.reserve(static_cast<size_t>(count));
+          for (uint64_t i = 0; OB_SUCC(ret) && i < count; ++i) {
+            CompactValue child;
+            uint8_t item_type = element_type;
+            if (element_type == 1 || element_type == 2) {
+              uint8_t bool_wire = 0;
+              if (OB_FAIL(read_byte(bool_wire))) {
+              } else if (bool_wire != 1 && bool_wire != 2) {
+                ret = OB_INVALID_DATA;
+              } else {
+                item_type = bool_wire;
+              }
+            }
+            if (OB_SUCC(ret) && OB_FAIL(read_value(item_type, child, depth + 1))) {
+            } else if (OB_SUCC(ret)) {
+              value.list_.push_back(std::move(child));
+            }
+          }
+        }
+      }
+    } else if (wire_type == 11) {
+      uint64_t count = 0;
+      if (OB_FAIL(read_varint(count))) {
+      } else if (count > 1000000) {
+        ret = OB_SIZE_OVERFLOW;
+      } else {
+        value.kind_ = CompactKind::LIST;
+        if (count > 0) {
+          uint8_t types = 0;
+          if (OB_FAIL(read_byte(types))) {
+          } else {
+            const uint8_t key_type = types >> 4;
+            const uint8_t mapped_type = types & 0x0f;
+            value.list_.reserve(static_cast<size_t>(count * 2));
+            for (uint64_t i = 0; OB_SUCC(ret) && i < count; ++i) {
+              CompactValue key;
+              CompactValue mapped;
+              if (OB_FAIL(read_value(key_type, key, depth + 1))) {
+              } else if (OB_FAIL(read_value(mapped_type, mapped, depth + 1))) {
+              } else {
+                value.list_.push_back(std::move(key));
+                value.list_.push_back(std::move(mapped));
+              }
+            }
+          }
+        }
+      }
+    } else if (wire_type == 12) {
+      ret = read_struct(value, depth + 1);
+    } else {
+      ret = OB_INVALID_DATA;
+    }
+    return ret;
+  }
+
+  std::istream &input_;
+  int64_t consumed_;
+};
+
+const CompactValue *compact_field(const CompactValue &value, int32_t field_id)
+{
+  const auto iter = value.fields_.find(field_id);
+  return iter == value.fields_.end() ? nullptr : &iter->second;
+}
+
+int64_t compact_int(const CompactValue &value, int32_t field_id, int64_t default_value = 0)
+{
+  const CompactValue *field = compact_field(value, field_id);
+  return field != nullptr && field->kind_ == CompactKind::INTEGER ? field->integer_ : default_value;
+}
+
+bool read_little_u32(std::istream &input, uint32_t &value)
+{
+  char bytes[4] = {0};
+  input.read(bytes, sizeof(bytes));
+  if (input.gcount() != sizeof(bytes)) return false;
+  value = static_cast<uint32_t>(static_cast<uint8_t>(bytes[0]))
+          | (static_cast<uint32_t>(static_cast<uint8_t>(bytes[1])) << 8)
+          | (static_cast<uint32_t>(static_cast<uint8_t>(bytes[2])) << 16)
+          | (static_cast<uint32_t>(static_cast<uint8_t>(bytes[3])) << 24);
+  return true;
+}
+
+bool read_little_u32(const std::string &input, size_t &pos, uint32_t &value)
+{
+  if (pos > input.size() || input.size() - pos < 4) return false;
+  value = static_cast<uint32_t>(static_cast<uint8_t>(input[pos]))
+          | (static_cast<uint32_t>(static_cast<uint8_t>(input[pos + 1])) << 8)
+          | (static_cast<uint32_t>(static_cast<uint8_t>(input[pos + 2])) << 16)
+          | (static_cast<uint32_t>(static_cast<uint8_t>(input[pos + 3])) << 24);
+  pos += 4;
+  return true;
+}
+
+int snappy_uncompress(const std::string &input, std::string &output)
+{
+  int ret = OB_SUCCESS;
+  size_t pos = 0;
+  uint64_t expected = 0;
+  int shift = 0;
+  bool length_done = false;
+  while (OB_SUCC(ret) && !length_done && pos < input.size()) {
+    const uint8_t byte = static_cast<uint8_t>(input[pos++]);
+    if (shift >= 64 || (shift == 63 && (byte & 0xfe) != 0)) ret = OB_INVALID_DATA;
+    else {
+      expected |= static_cast<uint64_t>(byte & 0x7f) << shift;
+      shift += 7;
+      length_done = (byte & 0x80) == 0;
+    }
+  }
+  if (OB_SUCC(ret) && (!length_done || expected > 64 * 1024 * 1024)) ret = OB_SIZE_OVERFLOW;
+  output.clear();
+  if (OB_SUCC(ret)) output.reserve(static_cast<size_t>(expected));
+  while (OB_SUCC(ret) && pos < input.size() && output.size() < expected) {
+    const uint8_t tag = static_cast<uint8_t>(input[pos++]);
+    const uint8_t kind = tag & 3;
+    uint64_t length = 0;
+    uint64_t offset = 0;
+    if (kind == 0) {
+      const uint8_t encoded_length = tag >> 2;
+      if (encoded_length < 60) {
+        length = encoded_length + 1;
+      } else {
+        const int length_bytes = encoded_length - 59;
+        if (length_bytes > 4 || pos + static_cast<size_t>(length_bytes) > input.size()) {
+          ret = OB_INVALID_DATA;
+        } else {
+          uint64_t encoded = 0;
+          for (int i = 0; i < length_bytes; ++i) {
+            encoded |= static_cast<uint64_t>(static_cast<uint8_t>(input[pos++])) << (i * 8);
+          }
+          length = encoded + 1;
+        }
+      }
+      if (OB_SUCC(ret) && (length > input.size() - pos || length > expected - output.size())) {
+        ret = OB_INVALID_DATA;
+      } else if (OB_SUCC(ret)) {
+        output.append(input.data() + pos, static_cast<size_t>(length));
+        pos += static_cast<size_t>(length);
+      }
+    } else {
+      length = 1 + (tag >> 2);
+      if (kind == 1) {
+        if (pos >= input.size()) ret = OB_INVALID_DATA;
+        else {
+          offset = (static_cast<uint64_t>(tag & 0xe0) << 3)
+                   | static_cast<uint8_t>(input[pos++]);
+        }
+      } else if (kind == 2) {
+        if (pos + 2 > input.size()) ret = OB_INVALID_DATA;
+        else {
+          offset = static_cast<uint8_t>(input[pos])
+                   | (static_cast<uint64_t>(static_cast<uint8_t>(input[pos + 1])) << 8);
+          pos += 2;
+        }
+      } else {
+        if (pos + 4 > input.size()) ret = OB_INVALID_DATA;
+        else {
+          offset = static_cast<uint8_t>(input[pos])
+                   | (static_cast<uint64_t>(static_cast<uint8_t>(input[pos + 1])) << 8)
+                   | (static_cast<uint64_t>(static_cast<uint8_t>(input[pos + 2])) << 16)
+                   | (static_cast<uint64_t>(static_cast<uint8_t>(input[pos + 3])) << 24);
+          pos += 4;
+        }
+      }
+      if (OB_SUCC(ret) && (offset == 0 || offset > output.size() || length > expected - output.size())) {
+        ret = OB_INVALID_DATA;
+      } else if (OB_SUCC(ret)) {
+        for (uint64_t i = 0; i < length; ++i) output.push_back(output[output.size() - offset]);
+      }
+    }
+  }
+  if (OB_SUCC(ret) && (output.size() != expected || pos != input.size())) ret = OB_INVALID_DATA;
+  return ret;
+}
+
+} // namespace
+
+namespace
+{
+struct ParquetColumnInfo
+{
+  std::string name_;
+  int32_t physical_type_;
+  int32_t type_length_;
+  int32_t max_definition_level_;
+  int32_t max_repetition_level_;
+  int32_t converted_type_;
+  InferredType inferred_type_;
+};
+
+struct ParquetChunkInfo
+{
+  int64_t start_offset_;
+  int64_t compressed_size_;
+  int64_t num_values_;
+  int32_t codec_;
+  int32_t physical_type_;
+  int32_t type_length_;
+};
+
+struct ParquetRowGroupInfo
+{
+  int64_t row_count_;
+  std::vector<ParquetChunkInfo> chunks_;
+};
+
+struct ParquetMetadata
+{
+  std::vector<ParquetColumnInfo> columns_;
+  std::vector<ParquetRowGroupInfo> row_groups_;
+  FileIdentity identity_;
+};
+
+InferredType parquet_inferred_type(int32_t physical_type, int32_t converted_type)
+{
+  InferredType type = InferredType::VARCHAR;
+  switch (physical_type) {
+    case 0: type = InferredType::BOOLEAN; break;
+    case 1: type = converted_type == 6 ? InferredType::DATE : InferredType::BIGINT; break;
+    case 2: type = converted_type == 9 || converted_type == 10
+                      ? InferredType::DATETIME : InferredType::BIGINT; break;
+    case 4:
+    case 5: type = InferredType::DOUBLE; break;
+    case 6:
+    case 7: type = InferredType::VARCHAR; break;
+    default: type = InferredType::VARCHAR; break;
+  }
+  return type;
+}
+
+int parse_parquet_metadata(const std::string &path, ParquetMetadata &metadata)
+{
+  int ret = OB_SUCCESS;
+  metadata.columns_.clear();
+  metadata.row_groups_.clear();
+  std::ifstream input(path, std::ios::in | std::ios::binary);
+  if (!input.is_open()) {
+    ret = OB_FILE_NOT_EXIST;
+  } else if (OB_FAIL(get_file_identity(path, metadata.identity_))) {
+  } else if (metadata.identity_.size_ < 12) {
+    ret = OB_INVALID_DATA;
+  } else {
+    char magic[4] = {0};
+    input.read(magic, sizeof(magic));
+    if (input.gcount() != sizeof(magic) || memcmp(magic, "PAR1", 4) != 0) {
+      ret = OB_INVALID_DATA;
+    }
+    uint32_t footer_length = 0;
+    if (OB_SUCC(ret)) {
+      input.seekg(metadata.identity_.size_ - 8);
+      char footer_tail[8] = {0};
+      input.read(footer_tail, sizeof(footer_tail));
+      if (input.gcount() != sizeof(footer_tail) || memcmp(footer_tail + 4, "PAR1", 4) != 0) {
+        ret = OB_INVALID_DATA;
+      } else {
+        const std::string tail(footer_tail, sizeof(footer_tail));
+        size_t pos = 0;
+        if (!read_little_u32(tail, pos, footer_length)
+            || footer_length > 64 * 1024 * 1024
+            || static_cast<int64_t>(footer_length) > metadata.identity_.size_ - 12) {
+          ret = OB_INVALID_DATA;
+        }
+      }
+    }
+    std::string footer;
+    if (OB_SUCC(ret)) {
+      footer.resize(footer_length);
+      input.seekg(metadata.identity_.size_ - 8 - footer_length);
+      input.read(footer.data(), static_cast<std::streamsize>(footer.size()));
+      if (input.gcount() != static_cast<std::streamsize>(footer.size())) ret = OB_INVALID_DATA;
+    }
+    CompactValue root;
+    if (OB_SUCC(ret)) {
+      std::istringstream footer_input(footer, std::ios::in | std::ios::binary);
+      CompactReader reader(footer_input);
+      ret = reader.read_struct(root);
+    }
+    const CompactValue *schema = OB_SUCC(ret) ? compact_field(root, 2) : nullptr;
+    const CompactValue *row_groups = OB_SUCC(ret) ? compact_field(root, 4) : nullptr;
+    if (OB_SUCC(ret) && (schema == nullptr || schema->kind_ != CompactKind::LIST
+                         || schema->list_.empty() || row_groups == nullptr
+                         || row_groups->kind_ != CompactKind::LIST)) {
+      ret = OB_INVALID_DATA;
+    }
+    int64_t declared_columns = 0;
+    if (OB_SUCC(ret)) {
+      const CompactValue &root_schema = schema->list_[0];
+      declared_columns = compact_int(root_schema, 5, -1);
+      if (declared_columns < 0 || declared_columns > DEFAULT_MAX_COLUMNS
+          || static_cast<size_t>(declared_columns + 1) != schema->list_.size()) {
+        ret = OB_NOT_SUPPORTED;
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < declared_columns; ++i) {
+      const CompactValue &element = schema->list_[static_cast<size_t>(i + 1)];
+      const CompactValue *name = compact_field(element, 4);
+      const int64_t physical_type = compact_int(element, 1, -1);
+      const int64_t repetition = compact_int(element, 3, 0);
+      const int64_t children = compact_int(element, 5, 0);
+      const int64_t converted = compact_int(element, 6, -1);
+      const int64_t type_length = compact_int(element, 2, 0);
+      if (name == nullptr || name->kind_ != CompactKind::BINARY || name->binary_.empty()
+          || physical_type < 0 || physical_type > 7 || physical_type == 3 || children != 0
+          || repetition < 0 || repetition > 2 || repetition == 2
+          || type_length < 0 || type_length > INT32_MAX) {
+        ret = OB_NOT_SUPPORTED;
+      } else {
+        ParquetColumnInfo column;
+        column.name_ = name->binary_;
+        column.physical_type_ = static_cast<int32_t>(physical_type);
+        column.type_length_ = static_cast<int32_t>(type_length);
+        column.max_definition_level_ = repetition == 1 ? 1 : 0;
+        column.max_repetition_level_ = 0;
+        column.converted_type_ = static_cast<int32_t>(converted);
+        column.inferred_type_ = parquet_inferred_type(column.physical_type_, static_cast<int32_t>(converted));
+        metadata.columns_.push_back(std::move(column));
+      }
+    }
+    if (OB_SUCC(ret) && row_groups->list_.size() > 1000000) ret = OB_SIZE_OVERFLOW;
+    for (size_t group_idx = 0; OB_SUCC(ret) && group_idx < row_groups->list_.size(); ++group_idx) {
+      const CompactValue &group_value = row_groups->list_[group_idx];
+      const CompactValue *chunks = compact_field(group_value, 1);
+      const int64_t row_count = compact_int(group_value, 3, -1);
+      if (chunks == nullptr || chunks->kind_ != CompactKind::LIST
+          || chunks->list_.size() != metadata.columns_.size()
+          || row_count < 0 || row_count > 1000000000LL) {
+        ret = OB_INVALID_DATA;
+      } else {
+        ParquetRowGroupInfo group;
+        group.row_count_ = row_count;
+        group.chunks_.reserve(chunks->list_.size());
+        for (size_t col_idx = 0; OB_SUCC(ret) && col_idx < chunks->list_.size(); ++col_idx) {
+          const CompactValue *column_metadata = compact_field(chunks->list_[col_idx], 3);
+          if (column_metadata == nullptr || column_metadata->kind_ != CompactKind::STRUCT) {
+            ret = OB_INVALID_DATA;
+          } else {
+            const int64_t physical_type = compact_int(*column_metadata, 1, -1);
+            const int64_t codec = compact_int(*column_metadata, 4, -1);
+            const int64_t num_values = compact_int(*column_metadata, 5, -1);
+            const int64_t compressed_size = compact_int(*column_metadata, 7, -1);
+            const int64_t data_offset = compact_int(*column_metadata, 9, -1);
+            const int64_t dictionary_offset = compact_int(*column_metadata, 11, -1);
+            const int64_t start_offset = dictionary_offset >= 0 ? dictionary_offset : data_offset;
+            if (physical_type != metadata.columns_[col_idx].physical_type_
+                || codec < 0 || codec > 1 || num_values < row_count
+                || num_values > 2000000000LL || compressed_size <= 0
+                || compressed_size > 1024LL * 1024 * 1024 || start_offset < 4
+                || start_offset > metadata.identity_.size_
+                || compressed_size > metadata.identity_.size_ - start_offset) {
+              ret = OB_NOT_SUPPORTED;
+            } else {
+              ParquetChunkInfo chunk;
+              chunk.start_offset_ = start_offset;
+              chunk.compressed_size_ = compressed_size;
+              chunk.num_values_ = num_values;
+              chunk.codec_ = static_cast<int32_t>(codec);
+              chunk.physical_type_ = static_cast<int32_t>(physical_type);
+              chunk.type_length_ = metadata.columns_[col_idx].type_length_;
+              group.chunks_.push_back(chunk);
+            }
+          }
+        }
+        if (OB_SUCC(ret)) metadata.row_groups_.push_back(std::move(group));
+      }
+    }
+    if (OB_SUCC(ret)) ret = get_file_identity(path, metadata.identity_);
+  }
+  return ret;
+}
+
+} // namespace
+
+int infer_parquet_schema(const std::string &path, std::vector<CsvColumn> &columns)
+{
+  int ret = OB_SUCCESS;
+  columns.clear();
+  ParquetMetadata metadata;
+  if (OB_FAIL(parse_parquet_metadata(path, metadata))) {
+  } else {
+    for (const ParquetColumnInfo &source : metadata.columns_) {
+      CsvColumn column;
+      column.name_ = source.name_;
+      column.type_ = source.inferred_type_;
+      column.nullable_ = source.max_definition_level_ > 0;
+      columns.push_back(std::move(column));
+    }
+  }
+  return ret;
+}
+
+namespace
+{
+struct ParquetImpl
+{
+  ParquetImpl()
+    : row_group_index_(0), row_index_(0), identity_(), row_group_loaded_(false), inited_(false)
+  {}
+  std::string path_;
+  std::ifstream input_;
+  ParquetMetadata metadata_;
+  std::vector<size_t> selected_columns_;
+  std::vector<std::vector<ParquetField>> column_values_;
+  size_t row_group_index_;
+  size_t row_index_;
+  FileIdentity identity_;
+  bool row_group_loaded_;
+  bool inited_;
+};
+
+int decode_hybrid(const std::string &input,
+                  const int32_t bit_width,
+                  const int64_t expected_count,
+                  std::vector<int32_t> &values)
+{
+  int ret = OB_SUCCESS;
+  values.clear();
+  if (bit_width < 0 || bit_width > 32 || expected_count < 0 || expected_count > 1000000000LL) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (bit_width == 0) {
+    values.assign(static_cast<size_t>(expected_count), 0);
+  } else {
+    size_t pos = 0;
+    while (OB_SUCC(ret) && values.size() < static_cast<size_t>(expected_count)) {
+      uint64_t header = 0;
+      int shift = 0;
+      bool done = false;
+      while (OB_SUCC(ret) && !done) {
+        if (pos >= input.size() || shift >= 64) {
+          ret = OB_INVALID_DATA;
+        } else {
+          const uint8_t byte = static_cast<uint8_t>(input[pos++]);
+          header |= static_cast<uint64_t>(byte & 0x7f) << shift;
+          shift += 7;
+          done = (byte & 0x80) == 0;
+        }
+      }
+      if (OB_FAIL(ret)) {
+      } else if ((header & 1) == 0) {
+        const size_t count = static_cast<size_t>(header >> 1);
+        const size_t width = static_cast<size_t>((bit_width + 7) / 8);
+        if (count == 0 || count > static_cast<size_t>(expected_count) - values.size()
+            || pos + width > input.size()) {
+          ret = OB_INVALID_DATA;
+        } else {
+          uint32_t value = 0;
+          for (size_t i = 0; i < width; ++i) value |= static_cast<uint32_t>(static_cast<uint8_t>(input[pos++])) << (8 * i);
+          values.insert(values.end(), count, static_cast<int32_t>(value));
+        }
+      } else {
+        const size_t groups = static_cast<size_t>(header >> 1);
+        const size_t count = groups * 8;
+        const size_t bytes = (count * static_cast<size_t>(bit_width) + 7) / 8;
+        const size_t remaining = static_cast<size_t>(expected_count) - values.size();
+        // Bit-packed groups are eight values wide and may contain padding in
+        // the final group when the row count is not a multiple of eight.
+        if (groups == 0 || count < remaining || count - remaining >= 8
+            || pos + bytes > input.size()) {
+          ret = OB_INVALID_DATA;
+        } else {
+          size_t bit_pos = 0;
+          for (size_t i = 0; i < count; ++i) {
+            uint32_t value = 0;
+            for (int32_t bit = 0; bit < bit_width; ++bit) {
+              const size_t source = bit_pos + static_cast<size_t>(bit);
+              if ((static_cast<uint8_t>(input[pos + source / 8]) >> (source % 8)) & 1) {
+                value |= 1U << bit;
+              }
+            }
+            if (i < remaining) values.push_back(static_cast<int32_t>(value));
+            bit_pos += static_cast<size_t>(bit_width);
+          }
+          pos += bytes;
+        }
+      }
+    }
+  }
+  if (OB_SUCC(ret) && values.size() != static_cast<size_t>(expected_count)) ret = OB_INVALID_DATA;
+  return ret;
+}
+
+int decode_levels(const std::string &input,
+                  size_t &pos,
+                  const int32_t bit_width,
+                  const int64_t expected_count,
+                  const bool has_length_prefix,
+                  std::vector<int32_t> &values)
+{
+  int ret = OB_SUCCESS;
+  uint32_t section_length = 0;
+  if (has_length_prefix && !read_little_u32(input, pos, section_length)) {
+    ret = OB_INVALID_DATA;
+  } else if (!has_length_prefix) {
+    section_length = static_cast<uint32_t>(input.size() - pos);
+  }
+  if (OB_SUCC(ret) && section_length > input.size() - pos) ret = OB_INVALID_DATA;
+  if (OB_SUCC(ret)) {
+    const std::string section(input.data() + pos, section_length);
+    pos += section_length;
+    ret = decode_hybrid(section, bit_width, expected_count, values);
+  }
+  return ret;
+}
+
+int decode_plain_value(const std::string &data,
+                       size_t &pos,
+                       const int32_t physical_type,
+                       const int32_t type_length,
+                       std::string &value)
+{
+  int ret = OB_SUCCESS;
+  value.clear();
+  uint32_t length = 0;
+  switch (physical_type) {
+    case 0:
+      if (pos >= data.size()) ret = OB_INVALID_DATA;
+      else value = data[pos++] == 0 ? "false" : "true";
+      break;
+    case 1:
+      if (pos + 4 > data.size()) ret = OB_INVALID_DATA;
+      else {
+        const uint32_t raw = static_cast<uint32_t>(static_cast<uint8_t>(data[pos]))
+          | (static_cast<uint32_t>(static_cast<uint8_t>(data[pos + 1])) << 8)
+          | (static_cast<uint32_t>(static_cast<uint8_t>(data[pos + 2])) << 16)
+          | (static_cast<uint32_t>(static_cast<uint8_t>(data[pos + 3])) << 24);
+        value = std::to_string(static_cast<int32_t>(raw));
+        pos += 4;
+      }
+      break;
+    case 2:
+      if (pos + 8 > data.size()) ret = OB_INVALID_DATA;
+      else {
+        uint64_t raw = 0;
+        for (int i = 7; i >= 0; --i) raw = (raw << 8) | static_cast<uint8_t>(data[pos + i]);
+        value = std::to_string(static_cast<int64_t>(raw));
+        pos += 8;
+      }
+      break;
+    case 4:
+      if (pos + 4 > data.size()) ret = OB_INVALID_DATA;
+      else {
+        uint32_t raw = static_cast<uint32_t>(static_cast<uint8_t>(data[pos]))
+          | (static_cast<uint32_t>(static_cast<uint8_t>(data[pos + 1])) << 8)
+          | (static_cast<uint32_t>(static_cast<uint8_t>(data[pos + 2])) << 16)
+          | (static_cast<uint32_t>(static_cast<uint8_t>(data[pos + 3])) << 24);
+        float parsed = 0;
+        memcpy(&parsed, &raw, sizeof(raw));
+        std::ostringstream formatted;
+        formatted << std::setprecision(std::numeric_limits<float>::max_digits10) << parsed;
+        value = formatted.str();
+        pos += 4;
+      }
+      break;
+    case 5:
+      if (pos + 8 > data.size()) ret = OB_INVALID_DATA;
+      else {
+        uint64_t raw = 0;
+        for (int i = 7; i >= 0; --i) raw = (raw << 8) | static_cast<uint8_t>(data[pos + i]);
+        double parsed = 0;
+        memcpy(&parsed, &raw, sizeof(raw));
+        std::ostringstream formatted;
+        formatted << std::setprecision(std::numeric_limits<double>::max_digits10) << parsed;
+        value = formatted.str();
+        pos += 8;
+      }
+      break;
+    case 6:
+      if (!read_little_u32(data, pos, length)) {
+        ret = OB_INVALID_DATA;
+      } else if (length > data.size() - pos) {
+        ret = OB_INVALID_DATA;
+      } else {
+        value.assign(data.data() + pos, length);
+        pos += length;
+      }
+      break;
+    case 7:
+      if (type_length <= 0 || static_cast<size_t>(type_length) > data.size() - pos) ret = OB_INVALID_DATA;
+      else { value.assign(data.data() + pos, static_cast<size_t>(type_length)); pos += static_cast<size_t>(type_length); }
+      break;
+    default: ret = OB_NOT_SUPPORTED; break;
+  }
+  return ret;
+}
+
+int decode_data_page(const std::string &payload,
+                     const int32_t physical_type,
+                     const int32_t type_length,
+                     const int32_t max_repetition_level,
+                     const int32_t max_definition_level,
+                     const int32_t num_values,
+                     const int32_t encoding,
+                     const std::vector<std::string> &dictionary,
+                     std::vector<ParquetField> &values)
+{
+  int ret = OB_SUCCESS;
+  if (num_values < 0 || num_values > 1000000000) {
+    ret = OB_INVALID_DATA;
+  } else {
+    size_t pos = 0;
+    std::vector<int32_t> repetition;
+    std::vector<int32_t> definition;
+    const int32_t rep_width = max_repetition_level == 0 ? 0
+      : static_cast<int32_t>(std::ceil(std::log2(static_cast<double>(max_repetition_level + 1))));
+    const int32_t def_width = max_definition_level == 0 ? 0
+      : static_cast<int32_t>(std::ceil(std::log2(static_cast<double>(max_definition_level + 1))));
+    if (max_repetition_level > 0
+        && OB_FAIL(decode_levels(payload, pos, rep_width, num_values, true, repetition))) {
+    } else if (max_definition_level > 0
+               && OB_FAIL(decode_levels(payload, pos, def_width, num_values, true, definition))) {
+    } else if (encoding == 2 || encoding == 8) {
+      if (pos >= payload.size()) ret = OB_INVALID_DATA;
+      else {
+        const int32_t index_width = static_cast<int32_t>(static_cast<uint8_t>(payload[pos++]));
+        uint32_t encoded_length = 0;
+        int64_t non_null_count = num_values;
+        if (max_definition_level > 0) {
+          non_null_count = 0;
+          for (int32_t level : definition) non_null_count += level == max_definition_level;
+        }
+        if (!read_little_u32(payload, pos, encoded_length) || encoded_length > payload.size() - pos) {
+          ret = OB_INVALID_DATA;
+        } else {
+          const std::string encoded(payload.data() + pos, encoded_length);
+          std::vector<int32_t> indices;
+          if (OB_FAIL(decode_hybrid(encoded, index_width, non_null_count, indices))) {
+          } else {
+            size_t index = 0;
+            for (int32_t i = 0; OB_SUCC(ret) && i < num_values; ++i) {
+              const bool is_null = max_definition_level > 0 && definition[static_cast<size_t>(i)] < max_definition_level;
+              ParquetField field;
+              field.is_null_ = is_null;
+              if (!is_null) {
+                if (index >= indices.size() || indices[index] < 0
+                    || static_cast<size_t>(indices[index]) >= dictionary.size()) ret = OB_INVALID_DATA;
+                else field.value_ = dictionary[static_cast<size_t>(indices[index])];
+                ++index;
+              }
+              values.push_back(std::move(field));
+            }
+          }
+        }
+      }
+    } else if (encoding != 0) {
+      ret = OB_NOT_SUPPORTED;
+    } else if (physical_type == 0) {
+      size_t value_bit = 0;
+      for (int32_t i = 0; OB_SUCC(ret) && i < num_values; ++i) {
+        const bool is_null = max_definition_level > 0 && definition[static_cast<size_t>(i)] < max_definition_level;
+        ParquetField field;
+        field.is_null_ = is_null;
+        if (!is_null) {
+          if (value_bit / 8 >= payload.size() - pos) ret = OB_INVALID_DATA;
+          else field.value_.assign(1, static_cast<char>((static_cast<uint8_t>(payload[pos + value_bit / 8]) >> (value_bit % 8)) & 1));
+          ++value_bit;
+        }
+        values.push_back(std::move(field));
+      }
+      if (OB_SUCC(ret)) pos += (value_bit + 7) / 8;
+    } else {
+      for (int32_t i = 0; OB_SUCC(ret) && i < num_values; ++i) {
+        const bool is_null = max_definition_level > 0 && definition[static_cast<size_t>(i)] < max_definition_level;
+        ParquetField field;
+        field.is_null_ = is_null;
+        if (!is_null && OB_FAIL(decode_plain_value(payload, pos, physical_type, type_length, field.value_))) {
+        }
+        values.push_back(std::move(field));
+      }
+    }
+  }
+  return ret;
+}
+
+int parse_page_header(std::istream &input,
+                      int32_t &page_type,
+                      int32_t &compressed_size,
+                      int32_t &uncompressed_size,
+                      CompactValue &data_header,
+                      CompactValue &data_header_v2,
+                      CompactValue &dictionary_header,
+                      int64_t &header_bytes)
+{
+  int ret = OB_SUCCESS;
+  CompactReader reader(input);
+  CompactValue header;
+  if (OB_FAIL(reader.read_struct(header))) {
+  } else {
+    page_type = static_cast<int32_t>(compact_int(header, 1, -1));
+    uncompressed_size = static_cast<int32_t>(compact_int(header, 2, -1));
+    compressed_size = static_cast<int32_t>(compact_int(header, 3, -1));
+    const CompactValue *v1 = compact_field(header, 5);
+    const CompactValue *v2 = compact_field(header, 8);
+    const CompactValue *dict = compact_field(header, 7);
+    if (v1 != nullptr) data_header = *v1;
+    if (v2 != nullptr) data_header_v2 = *v2;
+    if (dict != nullptr) dictionary_header = *dict;
+    header_bytes = reader.consumed();
+    if (page_type < 0 || compressed_size < 0 || uncompressed_size < 0) ret = OB_INVALID_DATA;
+  }
+  return ret;
+}
+
+int read_parquet_column(ParquetImpl &impl,
+                        const ParquetChunkInfo &chunk,
+                        const ParquetColumnInfo &column,
+                        const int64_t expected_rows,
+                        std::vector<ParquetField> &values)
+{
+  int ret = OB_SUCCESS;
+  values.clear();
+  std::vector<std::string> dictionary;
+  int64_t offset = chunk.start_offset_;
+  int64_t value_count = 0;
+  while (OB_SUCC(ret) && value_count < chunk.num_values_) {
+    impl.input_.clear();
+    impl.input_.seekg(offset);
+    if (!impl.input_) {
+      ret = OB_IO_ERROR;
+    } else {
+      int32_t page_type = 0;
+      int32_t compressed_size = 0;
+      int32_t uncompressed_size = 0;
+      int64_t header_bytes = 0;
+      CompactValue data_header;
+      CompactValue data_header_v2;
+      CompactValue dictionary_header;
+      if (OB_FAIL(parse_page_header(impl.input_, page_type, compressed_size, uncompressed_size,
+                                    data_header, data_header_v2, dictionary_header, header_bytes))) {
+      } else if (compressed_size > 1024 * 1024 * 1024 || uncompressed_size > 1024 * 1024 * 1024) {
+        ret = OB_SIZE_OVERFLOW;
+      } else {
+        std::string compressed(static_cast<size_t>(compressed_size), '\0');
+        impl.input_.read(compressed.data(), compressed.size());
+        if (impl.input_.gcount() != static_cast<std::streamsize>(compressed.size())) {
+          ret = OB_INVALID_DATA;
+        } else {
+          std::string payload;
+          // Parquet DataPageV2 keeps repetition/definition levels uncompressed;
+          // only the values suffix is compressed with the page codec.
+          if (page_type == 3 && chunk.codec_ == 1) {
+            const int32_t definition_bytes = static_cast<int32_t>(compact_int(data_header_v2, 5, -1));
+            const int32_t repetition_bytes = static_cast<int32_t>(compact_int(data_header_v2, 6, -1));
+            const int64_t levels_bytes = static_cast<int64_t>(definition_bytes) + repetition_bytes;
+            if (definition_bytes < 0 || repetition_bytes < 0 || levels_bytes > static_cast<int64_t>(compressed.size())) {
+              ret = OB_INVALID_DATA;
+            } else {
+              std::string values;
+              const size_t prefix_size = static_cast<size_t>(levels_bytes);
+              const std::string compressed_values(compressed.data() + prefix_size,
+                                                   compressed.size() - prefix_size);
+              if (OB_FAIL(snappy_uncompress(compressed_values, values))) {
+              } else {
+                payload.assign(compressed.data(), prefix_size);
+                payload.append(values);
+              }
+            }
+          } else if (chunk.codec_ == 1) {
+            ret = snappy_uncompress(compressed, payload);
+          } else {
+            payload = std::move(compressed);
+          }
+          if (OB_SUCC(ret) && payload.size() != static_cast<size_t>(uncompressed_size)) ret = OB_INVALID_DATA;
+          if (OB_SUCC(ret) && page_type == 2) {
+            const int32_t dictionary_values = static_cast<int32_t>(compact_int(dictionary_header, 1, -1));
+            size_t value_pos = 0;
+            if (dictionary_values < 0) ret = OB_INVALID_DATA;
+            else {
+              for (int32_t i = 0; OB_SUCC(ret) && i < dictionary_values; ++i) {
+                std::string value;
+                if (OB_FAIL(decode_plain_value(payload, value_pos, column.physical_type_, column.type_length_, value))) {
+                } else {
+                  dictionary.push_back(std::move(value));
+                }
+              }
+            }
+          } else if (OB_SUCC(ret) && page_type == 0) {
+            const int32_t page_values = static_cast<int32_t>(compact_int(data_header, 1, -1));
+            const int32_t encoding = static_cast<int32_t>(compact_int(data_header, 2, -1));
+            const int32_t level_encoding = static_cast<int32_t>(compact_int(data_header, 3, -1));
+            if (page_values <= 0 || encoding < 0 || level_encoding < 0) ret = OB_INVALID_DATA;
+            else if (OB_FAIL(decode_data_page(payload, column.physical_type_, column.type_length_,
+                                              column.max_repetition_level_, column.max_definition_level_,
+                                              page_values, encoding,
+                                              dictionary, values))) {
+            } else {
+              value_count += page_values;
+            }
+          } else if (OB_SUCC(ret) && page_type == 3) {
+            const int32_t page_values = static_cast<int32_t>(compact_int(data_header_v2, 1, -1));
+            const int32_t null_count = static_cast<int32_t>(compact_int(data_header_v2, 2, -1));
+            const int32_t encoding = static_cast<int32_t>(compact_int(data_header_v2, 4, -1));
+            const int32_t definition_bytes = static_cast<int32_t>(compact_int(data_header_v2, 5, -1));
+            const int32_t repetition_bytes = static_cast<int32_t>(compact_int(data_header_v2, 6, -1));
+            const int32_t rep_width = column.max_repetition_level_ == 0 ? 0
+              : static_cast<int32_t>(std::ceil(std::log2(static_cast<double>(column.max_repetition_level_ + 1))));
+            const int32_t def_width = column.max_definition_level_ == 0 ? 0
+              : static_cast<int32_t>(std::ceil(std::log2(static_cast<double>(column.max_definition_level_ + 1))));
+            if (page_values <= 0 || null_count < 0 || definition_bytes < 0 || repetition_bytes < 0
+                || static_cast<size_t>(definition_bytes) + repetition_bytes > payload.size()) {
+              ret = OB_INVALID_DATA;
+            } else {
+              std::vector<int32_t> repetition;
+              std::vector<int32_t> definition;
+              const std::string rep_data(payload.data(), static_cast<size_t>(repetition_bytes));
+              if (OB_FAIL(decode_hybrid(rep_data, rep_width, page_values, repetition))) {
+              } else {
+                const std::string def_data(payload.data() + repetition_bytes, static_cast<size_t>(definition_bytes));
+                size_t def_pos = 0;
+                if (OB_FAIL(decode_hybrid(def_data, def_width, page_values, definition))) {
+                } else {
+                  const std::string values_data(payload.data() + repetition_bytes + definition_bytes,
+                                                payload.size() - repetition_bytes - definition_bytes);
+                  if (encoding != 0) {
+                    ret = OB_NOT_SUPPORTED;
+                  } else {
+                    size_t value_pos = 0;
+                    for (int32_t i = 0; OB_SUCC(ret) && i < page_values; ++i) {
+                      const bool is_null = column.max_definition_level_ > 0
+                        && definition[static_cast<size_t>(i)] < column.max_definition_level_;
+                      ParquetField field;
+                      field.is_null_ = is_null;
+                      if (!is_null && OB_FAIL(decode_plain_value(values_data, value_pos,
+                                                                  column.physical_type_, column.type_length_, field.value_))) {
+                      }
+                      values.push_back(std::move(field));
+                    }
+                    value_count += page_values;
+                  }
+                }
+              }
+            }
+          } else {
+            if (OB_SUCC(ret)) {
+              ret = OB_NOT_SUPPORTED;
+            }
+          }
+        }
+      }
+      offset += header_bytes + compressed_size;
+    }
+  }
+  if (OB_SUCC(ret) && (value_count != chunk.num_values_ || values.size() < static_cast<size_t>(expected_rows))) {
+    ret = OB_INVALID_DATA;
+  }
+  if (OB_SUCC(ret)) {
+    FileIdentity current;
+    if (OB_FAIL(get_file_identity(impl.path_, current))) {
+    } else if (current.device_ != impl.identity_.device_ || current.inode_ != impl.identity_.inode_
+               || current.size_ != impl.identity_.size_ || current.modified_sec_ != impl.identity_.modified_sec_
+               || current.modified_nsec_ != impl.identity_.modified_nsec_) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+  }
+  return ret;
+}
+
+int load_parquet_row_group(ParquetImpl &impl, const ParquetRowGroupInfo &group)
+{
+  int ret = OB_SUCCESS;
+  impl.column_values_.clear();
+  if (group.row_count_ < 0 || group.row_count_ > 1000000000LL
+      || group.chunks_.size() != impl.metadata_.columns_.size()) {
+    ret = OB_INVALID_DATA;
+  } else {
+    impl.column_values_.resize(impl.selected_columns_.size());
+    for (size_t i = 0; OB_SUCC(ret) && i < impl.selected_columns_.size(); ++i) {
+      const size_t source_index = impl.selected_columns_[i];
+      if (source_index >= group.chunks_.size()) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(read_parquet_column(impl, group.chunks_[source_index],
+                                             impl.metadata_.columns_[source_index],
+                                             group.row_count_, impl.column_values_[i]))) {
+      } else if (impl.column_values_[i].size() != static_cast<size_t>(group.row_count_)) {
+        ret = OB_INVALID_DATA;
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    impl.row_index_ = 0;
+    impl.row_group_loaded_ = true;
+  }
+  return ret;
+}
+
+} // namespace
+
+ParquetReader::ParquetReader() : impl_(nullptr) {}
+
+ParquetReader::~ParquetReader()
+{
+  close();
+}
+
+int ParquetReader::open(const std::string &path, const std::vector<std::string> &projected_columns)
+{
+  int ret = OB_SUCCESS;
+  close();
+  ParquetImpl *impl = new (std::nothrow) ParquetImpl();
+  if (impl == nullptr) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else if (OB_FAIL(parse_parquet_metadata(path, impl->metadata_))) {
+    delete impl;
+  } else {
+    impl->input_.open(path, std::ios::in | std::ios::binary);
+    if (!impl->input_.is_open()) {
+      ret = OB_FILE_NOT_EXIST;
+      delete impl;
+    } else if (OB_FAIL(get_file_identity(path, impl->identity_))) {
+      impl->input_.close();
+      delete impl;
+    } else {
+      impl->path_ = path;
+      impl->row_group_index_ = 0;
+      impl->row_index_ = 0;
+      impl->row_group_loaded_ = false;
+      for (size_t i = 0; i < impl->metadata_.columns_.size(); ++i) {
+        bool selected = false;
+        for (const std::string &name : projected_columns) {
+          if (name.size() == impl->metadata_.columns_[i].name_.size()
+              && std::equal(name.begin(), name.end(), impl->metadata_.columns_[i].name_.begin(),
+                            [](char left, char right) {
+                              return std::tolower(static_cast<unsigned char>(left))
+                                     == std::tolower(static_cast<unsigned char>(right));
+                            })) {
+            selected = true;
+            break;
+          }
+        }
+        if (selected) impl->selected_columns_.push_back(i);
+      }
+      impl->inited_ = true;
+      if (OB_SUCC(ret)) impl_ = impl;
+    }
+  }
+  return ret;
+}
+
+int ParquetReader::next(ParquetRecord &record, bool &has_record)
+{
+  int ret = OB_SUCCESS;
+  has_record = false;
+  record.fields_.clear();
+  record.row_number_ = 0;
+  ParquetImpl *impl = static_cast<ParquetImpl *>(impl_);
+  if (impl == nullptr || !impl->inited_) {
+    ret = OB_NOT_INIT;
+  } else {
+    while (OB_SUCC(ret) && impl->row_group_index_ < impl->metadata_.row_groups_.size()) {
+      const ParquetRowGroupInfo &group = impl->metadata_.row_groups_[impl->row_group_index_];
+      if (!impl->row_group_loaded_) {
+        if (OB_FAIL(load_parquet_row_group(*impl, group))) {
+        }
+      }
+      if (OB_SUCC(ret) && impl->row_index_ < static_cast<size_t>(group.row_count_)) {
+        record.fields_.resize(impl->column_values_.size());
+        for (size_t i = 0; i < impl->column_values_.size(); ++i) {
+          record.fields_[i] = impl->column_values_[i][impl->row_index_];
+        }
+        record.row_number_ = impl->row_index_;
+        ++impl->row_index_;
+        has_record = true;
+        break;
+      } else if (OB_SUCC(ret)) {
+        ++impl->row_group_index_;
+        impl->column_values_.clear();
+        impl->row_index_ = 0;
+        impl->row_group_loaded_ = false;
+      }
+    }
+  }
+  return ret;
+}
+
+void ParquetReader::close()
+{
+  ParquetImpl *impl = static_cast<ParquetImpl *>(impl_);
+  if (impl != nullptr) {
+    if (impl->input_.is_open()) impl->input_.close();
+    delete impl;
+    impl_ = nullptr;
+  }
 }
 
 const char *inferred_type_name(InferredType type)

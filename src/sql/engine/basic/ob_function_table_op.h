@@ -61,6 +61,7 @@ public:
     value_table_(NULL) 
     , file_reader_(NULL)
     , json_reader_(NULL)
+    , parquet_reader_(NULL)
     , next_file_idx_(0)
     , file_record_ready_(false)
     , file_has_record_(false)
@@ -89,12 +90,15 @@ private:
   int (ObFunctionTableOp::*next_row_func_)();
   file_sql::CsvReader *file_reader_;
   file_sql::JsonlReader *json_reader_;
+  file_sql::ParquetReader *parquet_reader_;
   file_sql::CsvReader file_reader_obj_;
   file_sql::JsonlReader json_reader_obj_;
+  file_sql::ParquetReader parquet_reader_obj_;
   std::vector<std::string> file_paths_;
   int64_t next_file_idx_;
   file_sql::CsvRecord file_record_;
   file_sql::JsonRecord json_record_;
+  file_sql::ParquetRecord parquet_record_;
   bool file_record_ready_;
   bool file_has_record_;
   bool file_header_skipped_;

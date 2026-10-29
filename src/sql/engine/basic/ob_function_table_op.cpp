@@ -84,8 +84,10 @@ int ObFunctionTableOp::inner_rescan()
     if (MY_SPEC.is_file_table_) {
       if (OB_NOT_NULL(file_reader_)) file_reader_->close();
       if (OB_NOT_NULL(json_reader_)) json_reader_->close();
+      if (OB_NOT_NULL(parquet_reader_)) parquet_reader_->close();
       file_reader_ = NULL;
       json_reader_ = NULL;
+      parquet_reader_ = NULL;
       file_record_ready_ = false;
       file_has_record_ = false;
       file_header_skipped_ = false;
@@ -112,8 +114,10 @@ int ObFunctionTableOp::inner_close()
   value_table_ = NULL;
   if (OB_NOT_NULL(file_reader_)) file_reader_->close();
   if (OB_NOT_NULL(json_reader_)) json_reader_->close();
+  if (OB_NOT_NULL(parquet_reader_)) parquet_reader_->close();
   file_reader_ = NULL;
   json_reader_ = NULL;
+  parquet_reader_ = NULL;
   file_paths_.clear();
   return ret;
 }
@@ -269,6 +273,7 @@ int ObFunctionTableOp::open_file_reader()
   int ret = OB_SUCCESS;
   file_reader_ = NULL;
   json_reader_ = NULL;
+  parquet_reader_ = NULL;
   file_paths_.clear();
   next_file_idx_ = 0;
   file_record_ready_ = false;
@@ -339,6 +344,20 @@ int ObFunctionTableOp::open_file_reader()
       json_reader_ = &json_reader_obj_;
       if (OB_FAIL(json_reader_->open(resolved_path, options))) {
         json_reader_ = NULL;
+      }
+    }
+  } else if (func == "read_parquet" || func == "READ_PARQUET") {
+    std::string resolved_path;
+    if (OB_FAIL(validate_path(path, resolved_path))) {
+    } else {
+      std::vector<std::string> projected_columns;
+      for (int64_t i = 0; i < MY_SPEC.file_column_names_.count(); ++i) {
+        const ObString &column_name = MY_SPEC.file_column_names_.at(i);
+        projected_columns.emplace_back(column_name.ptr(), static_cast<size_t>(column_name.length()));
+      }
+      parquet_reader_ = &parquet_reader_obj_;
+      if (OB_FAIL(parquet_reader_->open(resolved_path, projected_columns))) {
+        parquet_reader_ = NULL;
       }
     }
   } else {
@@ -468,6 +487,24 @@ int ObFunctionTableOp::inner_get_next_row_file()
         }
         OZ(fill_file_datum(field == NULL ? std::string() : field->value_,
                            field == NULL || field->is_null_, MY_SPEC.column_exprs_.at(i)));
+      }
+    }
+  } else if (OB_NOT_NULL(parquet_reader_)) {
+    bool has_record = false;
+    const int parquet_ret = parquet_reader_->next(parquet_record_, has_record);
+    if (OB_FAIL(parquet_ret)) {
+      ret = parquet_ret;
+    }
+    if (OB_SUCC(ret) && !has_record) {
+      ret = OB_ITER_END;
+    } else if (OB_SUCC(ret)) {
+      if (parquet_record_.fields_.size() != static_cast<size_t>(MY_SPEC.column_exprs_.count())) {
+        ret = OB_INVALID_DATA;
+      } else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < MY_SPEC.column_exprs_.count(); ++i) {
+          const file_sql::ParquetField &field = parquet_record_.fields_[static_cast<size_t>(i)];
+          OZ(fill_file_datum(field.value_, field.is_null_, MY_SPEC.column_exprs_.at(i)));
+        }
       }
     }
   } else {
