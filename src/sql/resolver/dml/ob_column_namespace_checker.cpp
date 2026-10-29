@@ -313,9 +313,26 @@ int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, c
         table_id, col_name, is_exist))) {
     }
   } else if (table_item.is_function_table()) {
-    if (OB_FAIL(ObResolverUtils::check_function_table_column_exist(table_item,
-                                                                   params_,
-                                                                   col_name))) {
+    if (OB_NOT_NULL(table_item.function_table_expr_)
+        && table_item.function_table_expr_->get_expr_type() == T_FILE_TABLE_FUNCTION) {
+      // File table functions register their inferred columns directly in the
+      // statement; they have no catalog or UDF collection metadata to query.
+      if (OB_NOT_NULL(dml_stmt_)) {
+        for (int64_t i = 0; i < dml_stmt_->get_column_size() && !is_exist; ++i) {
+          const ColumnItem *column_item = dml_stmt_->get_column_item(i);
+          if (OB_NOT_NULL(column_item)
+              && column_item->table_id_ == table_item.table_id_
+              && ObCharset::case_insensitive_equal(column_item->column_name_, col_name)) {
+            is_exist = true;
+          }
+        }
+      }
+      if (!is_exist) {
+        ret = OB_ERR_BAD_FIELD_ERROR;
+      }
+    } else if (OB_FAIL(ObResolverUtils::check_function_table_column_exist(table_item,
+                                                                          params_,
+                                                                          col_name))) {
     } else {
       is_exist = true;
     }

@@ -161,6 +161,11 @@ public:
       common::ObIAllocator *allocator,
       const common::ObString &parser_name,
       const common::ObString &parser_properties);
+  // The parser description and normalized properties are reusable across
+  // evaluations, while token/output allocations belong to the current
+  // expression evaluation.  Keep the cached helper and retarget its scratch
+  // allocator before each call.
+  void set_allocator(common::ObIAllocator *allocator) { allocator_ = allocator; }
   /**
    * Split document into multiple words
    *

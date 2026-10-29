@@ -5503,10 +5503,79 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
   if (OB_ISNULL(op.get_stmt())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(spec.column_exprs_.init(op.get_stmt()->get_column_size()))) {
+  } else if (OB_FAIL(spec.file_column_names_.init(op.get_stmt()->get_column_size()))) {
   } else if (OB_UNLIKELY(op.get_num_of_child() > 1)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_ISNULL(value_raw_expr = op.get_value_expr())) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (T_FILE_TABLE_FUNCTION == value_raw_expr->get_expr_type()) {
+    ObSysFunRawExpr *file_expr = static_cast<ObSysFunRawExpr *>(value_raw_expr);
+    if (OB_ISNULL(file_expr) || file_expr->get_param_count() <= 0
+        || OB_ISNULL(file_expr->get_param_expr(0))
+        || !file_expr->get_param_expr(0)->is_const_raw_expr()) {
+      ret = OB_INVALID_ARGUMENT;
+    } else {
+      const ObConstRawExpr *path_expr = static_cast<const ObConstRawExpr *>(file_expr->get_param_expr(0));
+      // Literal strings are parameterized as T_QUESTIONMARK during parsing:
+      // get_value() then contains only the parameter index and get_param()
+      // retains the literal object used to build the physical plan.
+      const ObObj &path_obj = path_expr->get_value().is_unknown()
+                                && path_expr->get_param().is_string_type()
+                              ? path_expr->get_param() : path_expr->get_value();
+      ObString path = path_obj.get_string();
+      ObString copied_path;
+      ObString copied_name;
+      if (OB_FAIL(ob_write_string(alloc, path, copied_path))) {
+      } else if (OB_FAIL(ob_write_string(alloc, file_expr->get_func_name(), copied_name))) {
+      } else {
+        spec.is_file_table_ = true;
+        spec.file_path_ = copied_path;
+        spec.file_func_name_ = copied_name;
+        spec.file_csv_header_ = true;
+        spec.file_csv_delimiter_ = ',';
+        for (int64_t p = 1; OB_SUCC(ret) && p < file_expr->get_param_count(); ++p) {
+          ObRawExpr *param = file_expr->get_param_expr(p);
+          ObString key;
+          if (p + 1 < file_expr->get_param_count() && param != NULL && param->is_const_raw_expr()
+              && static_cast<ObConstRawExpr *>(param)->get_value().is_string_type()) {
+            key = static_cast<ObConstRawExpr *>(param)->get_value().get_string();
+            ++p;
+            param = file_expr->get_param_expr(p);
+          }
+          if (OB_NOT_NULL(param) && param->is_const_raw_expr()) {
+            const ObConstRawExpr *const_param = static_cast<const ObConstRawExpr *>(param);
+            const ObObj &param_obj = const_param->get_value().is_unknown()
+                                      && const_param->get_param().is_string_type()
+                                    ? const_param->get_param() : const_param->get_value();
+            if (key.case_compare("header") == 0 && param->get_expr_type() == T_BOOL) {
+              spec.file_csv_header_ = param_obj.get_bool();
+            } else if (key.case_compare("delimiter") == 0
+                       && param_obj.is_string_type() && param_obj.get_string().length() == 1) {
+              spec.file_csv_delimiter_ = param_obj.get_string().ptr()[0];
+            }
+          }
+        }
+        spec.has_correlated_expr_ = false;
+        for (int64_t i = 0; OB_SUCC(ret) && i < op.get_output_exprs().count(); ++i) {
+          OZ (mark_expr_self_produced(op.get_output_exprs().at(i)));
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < op.get_stmt()->get_column_size(); ++i) {
+          ObExpr *rt_expr = nullptr;
+          const ColumnItem *col_item = op.get_stmt()->get_column_item(i);
+          CK (OB_NOT_NULL(col_item));
+          CK (OB_NOT_NULL(col_item->expr_));
+          if (OB_SUCC(ret) && col_item->table_id_ == op.get_table_id()
+              && col_item->expr_->is_explicited_reference()) {
+            ObString copied_column_name;
+            OZ (mark_expr_self_produced(col_item->expr_));
+            OZ (generate_rt_expr(*col_item->expr_, rt_expr));
+            OZ (spec.column_exprs_.push_back(rt_expr));
+            OZ (ob_write_string(alloc, col_item->column_name_, copied_column_name));
+            OZ (spec.file_column_names_.push_back(copied_column_name));
+          }
+        }
+      }
+    }
   } else if (OB_FAIL(generate_rt_expr(*value_raw_expr, value_expr))) {
   } else {
     spec.has_correlated_expr_ = value_raw_expr->has_flag(CNT_DYNAMIC_PARAM);

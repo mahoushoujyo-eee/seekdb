@@ -20,6 +20,7 @@
 %locations
 %verbose
 %error-verbose
+%expect 0
 %code requires {
 #include "parse_node.h"
 }
@@ -157,6 +158,7 @@
 
 %token ERROR /*used internal*/
 %token PARSER_SYNTAX_ERROR /*used internal*/
+%token FILE_ARROW /* named argument marker used by file table functions */
 
 %nonassoc LOWER_THAN_LOG
 %nonassoc LOG
@@ -394,6 +396,7 @@ END_P SET_VAR DELIMITER
 %type <node> update_asgn_list update_asgn_factor
 %type <node> update_basic_stmt delete_basic_stmt
 %type <node> table_element_list table_element column_definition column_definition_ref column_definition_list column_name_list
+%type <node> file_table_function_expr table_function_arguments table_function_argument_list table_function_argument
 %type <node> opt_generated_keyname opt_generated_option_list opt_generated_column_attribute_list generated_column_attribute opt_storage_type
 %type <node> data_type special_table_type opt_if_not_exists opt_if_exists opt_charset collation opt_collation cast_data_type
 %type <node> replace_with_opt_hint insert_with_opt_hint column_list opt_on_duplicate_key_clause opt_into opt_replace opt_temporary no_param_column_ref
@@ -10848,6 +10851,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_table_function_expr
+{
+  $$ = $1;
+}
 ;
 
 tbl_name:
@@ -17425,6 +17432,85 @@ JSON '(' column_name ')' STORE AS '(' lob_storage_parameters ')'
   ParseNode *params = NULL;
   merge_nodes(params, result, T_ARGUMENT_LIST, $8);
   malloc_non_terminal_node($$, result->malloc_pool_, T_LOB_STORAGE_CLAUSE, 3, type_node, $3, params);
+}
+;
+
+/* File table functions are resolved by the SQL engine and do not require a
+ * catalog table.  Keep the function name and argument list in a dedicated
+ * parse node so resolver code can validate the supported entry points before
+ * creating a function-table item. */
+file_table_function_expr:
+NAME_OB '(' table_function_arguments ')' %prec LOWER_PARENS
+{
+  ParseNode *function = NULL;
+  malloc_non_terminal_node(function, result->malloc_pool_, T_FUN_SYS, 2, $1, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNCTION, 4,
+                           function, NULL, NULL, NULL);
+}
+| NAME_OB '(' table_function_arguments ')' relation_name
+{
+  ParseNode *function = NULL;
+  malloc_non_terminal_node(function, result->malloc_pool_, T_FUN_SYS, 2, $1, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNCTION, 4,
+                           function, $5, NULL, NULL);
+}
+| NAME_OB '(' table_function_arguments ')' AS relation_name
+{
+  ParseNode *function = NULL;
+  malloc_non_terminal_node(function, result->malloc_pool_, T_FUN_SYS, 2, $1, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNCTION, 4,
+                           function, $6, NULL, NULL);
+}
+| NAME_OB '(' table_function_arguments ')' relation_name '(' relation_name_list ')'
+{
+  ParseNode *function = NULL;
+  malloc_non_terminal_node(function, result->malloc_pool_, T_FUN_SYS, 2, $1, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNCTION, 4,
+                           function, $5, $7, NULL);
+}
+| NAME_OB '(' table_function_arguments ')' AS relation_name '(' relation_name_list ')'
+{
+  ParseNode *function = NULL;
+  malloc_non_terminal_node(function, result->malloc_pool_, T_FUN_SYS, 2, $1, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNCTION, 4,
+                           function, $6, $8, NULL);
+}
+;
+
+table_function_arguments:
+/* empty */
+{
+  $$ = NULL;
+}
+| table_function_argument_list
+{
+  $$ = $1;
+}
+;
+
+table_function_argument_list:
+table_function_argument
+{
+  malloc_list_node($$, result->malloc_pool_, T_EXPR_LIST, 2, 1, $1);
+}
+| table_function_argument_list ',' table_function_argument
+{
+  push_back_list(result->malloc_pool_, result, $$, $1, $3);
+}
+;
+
+table_function_argument:
+simple_expr
+{
+  $$ = $1;
+}
+| relation_name FILE_ARROW simple_expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_ASSIGN_ITEM, 2, $1, $3);
+}
+| NAME_OB COMP_EQ simple_expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_ASSIGN_ITEM, 2, $1, $3);
 }
 ;
 

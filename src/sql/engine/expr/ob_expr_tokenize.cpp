@@ -15,6 +15,7 @@
  */
 
 #include "sql/engine/expr/ob_expr_tokenize.h"
+#include "sql/engine/ob_exec_context.h"
 
 #include "lib/alloc/alloc_struct.h"
 #include "lib/allocator/page_arena.h"
@@ -59,29 +60,66 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
 
   ObIJsonBase *json_result = nullptr;
   TokenizeParam param;
+  TokenizeCtx *tokenize_ctx = nullptr;
 
   // check param num, which is checked in ObExprOperator::calc_result_typeN.
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
-  } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
-  } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
-                                                     ctx,
-                                                     temp_allocator,
-                                                     json_result,
-                                                     expr_datum))) {
+  } else if (OB_UNLIKELY(ObExpr::INVALID_EXP_CTX_ID == expr.expr_ctx_id_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(tokenize_ctx = static_cast<TokenizeCtx *>(
+                         ctx.exec_ctx_.get_expr_op_ctx(expr.expr_ctx_id_)))
+             && OB_FAIL(ctx.exec_ctx_.create_expr_op_ctx(expr.expr_ctx_id_, tokenize_ctx))) {
+  } else if (OB_ISNULL(tokenize_ctx)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    bool is_same = false;
+    if (tokenize_ctx->inited_) {
+      is_same = tokenize_ctx->parser_name_ == param.parser_name_
+                && tokenize_ctx->properties_ == param.properties_;
+    }
+    if (OB_SUCC(ret) && !is_same) {
+      tokenize_ctx->helper_.reset();
+      tokenize_ctx->param_allocator_.reuse();
+      if (OB_FAIL(ob_write_string(tokenize_ctx->param_allocator_,
+                                  param.parser_name_, tokenize_ctx->parser_name_))) {
+      } else if (OB_FAIL(ob_write_string(tokenize_ctx->param_allocator_,
+                                         param.properties_, tokenize_ctx->properties_))) {
+      } else if (OB_FAIL(tokenize_ctx->helper_.init(&tokenize_ctx->param_allocator_,
+                                                   tokenize_ctx->parser_name_,
+                                                   tokenize_ctx->properties_))) {
+      } else {
+        tokenize_ctx->inited_ = true;
+      }
+    }
+    if (OB_SUCC(ret)) {
+      tokenize_ctx->helper_.set_allocator(&temp_allocator);
+    }
   }
 
+  if (OB_SUCC(ret) && OB_NOT_NULL(tokenize_ctx)) {
+    if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator,
+                                  &tokenize_ctx->helper_, json_result))) {
+    } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
+                                                       ctx,
+                                                       temp_allocator,
+                                                       json_result,
+                                                       expr_datum))) {
+    }
+  }
   return ret;
 }
 
 int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
                                       TokenizeParam::OUTPUT_MODE mode,
                                       ObIAllocator &allocator,
+                                      storage::ObFTParseHelper *cached_helper,
                                       ObIJsonBase *&result)
 {
   int ret = OB_SUCCESS;
-  storage::ObFTParseHelper tokenize_helper;
+  storage::ObFTParseHelper local_helper;
+  storage::ObFTParseHelper *tokenize_helper = OB_NOT_NULL(cached_helper) ? cached_helper : &local_helper;
   const int64_t ft_word_bkt_cnt = MIN(MAX(param.fulltext_.length() / 2, 2), 997);
   int64_t doc_len = 0;
   storage::ObFTWordMap token_map;
@@ -90,11 +128,12 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
 
   if (TokenizeParam::OUTPUT_MODE::DEFAULT != mode && TokenizeParam::OUTPUT_MODE::ALL != mode) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_FAIL(tokenize_helper.init(&allocator, param.parser_name_, param.properties_))) {
+  } else if (OB_ISNULL(cached_helper)
+             && OB_FAIL(tokenize_helper->init(&allocator, param.parser_name_, param.properties_))) {
   } else if (OB_FAIL(token_map.create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
   } else if (
       (0 != param.fulltext_.length())
-      && OB_FAIL(tokenize_helper.segment(
+      && OB_FAIL(tokenize_helper->segment(
                      param.meta_,
                      param.fulltext_.ptr(),
                      param.fulltext_.length(),
@@ -103,14 +142,14 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
   } else {
     switch (param.output_mode_) {
     case TokenizeParam::OUTPUT_MODE::DEFAULT: {
-      if (OB_FAIL(tokenize_helper.make_token_array_json(token_map, result))) {
+      if (OB_FAIL(tokenize_helper->make_token_array_json(token_map, result))) {
       } else {
         // pass
       }
       break;
     }
     case TokenizeParam::OUTPUT_MODE::ALL: {
-      if (OB_FAIL(tokenize_helper.make_detail_json(token_map, doc_len, result))) {
+      if (OB_FAIL(tokenize_helper->make_detail_json(token_map, doc_len, result))) {
       } else {
         // pass
       }

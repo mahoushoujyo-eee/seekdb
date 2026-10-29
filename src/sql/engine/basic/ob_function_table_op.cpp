@@ -19,6 +19,13 @@
 #include "sql/engine/basic/ob_function_table_op.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
+#include "common/timezone/ob_time_convert.h"
+#include "sql/engine/expr/ob_expr_operator.h"
+#include "sql/resolver/ob_resolver_utils.h"
+#include <cstdlib>
+#include <cstring>
+#include <algorithm>
+#include <limits.h>
 
 
 namespace oceanbase
@@ -27,14 +34,38 @@ using namespace common;
 namespace sql
 {
 
-OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_);
+OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_,
+                    is_file_table_, file_func_name_, file_path_, file_column_names_,
+                    file_csv_header_, file_csv_delimiter_);
+
+namespace
+{
+int parse_file_int(const std::string &value, int64_t &result)
+{
+  char *end = nullptr;
+  errno = 0;
+  result = std::strtoll(value.c_str(), &end, 10);
+  return (errno == 0 && end == value.c_str() + value.size()) ? OB_SUCCESS : OB_INVALID_DATA;
+}
+
+int parse_file_double(const std::string &value, double &result)
+{
+  char *end = nullptr;
+  errno = 0;
+  result = std::strtod(value.c_str(), &end);
+  return (errno == 0 && end == value.c_str() + value.size()) ? OB_SUCCESS : OB_INVALID_DATA;
+}
+}
 
 int ObFunctionTableOp::inner_open()
 {
   int ret = OB_SUCCESS;
   node_idx_ = 0;
   already_calc_ = false;
-  if (OB_ISNULL(MY_SPEC.value_expr_)) {
+  if (MY_SPEC.is_file_table_) {
+    next_row_func_ = &ObFunctionTableOp::inner_get_next_row_file;
+    ret = open_file_reader();
+  } else if (OB_ISNULL(MY_SPEC.value_expr_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (ObExtendType == MY_SPEC.value_expr_->datum_meta_.type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_udf;
@@ -50,6 +81,18 @@ int ObFunctionTableOp::inner_rescan()
   if (OB_FAIL(ObOperator::inner_rescan())) {
   } else {
     node_idx_ = 0;
+    if (MY_SPEC.is_file_table_) {
+      if (OB_NOT_NULL(file_reader_)) file_reader_->close();
+      if (OB_NOT_NULL(json_reader_)) json_reader_->close();
+      file_reader_ = NULL;
+      json_reader_ = NULL;
+      file_record_ready_ = false;
+      file_has_record_ = false;
+      file_header_skipped_ = false;
+      next_file_idx_ = 0;
+      if (OB_FAIL(open_file_reader())) {
+      }
+    }
     if (MY_SPEC.has_correlated_expr_) {
       row_count_ = 0;
       col_count_ = 0;
@@ -67,6 +110,11 @@ int ObFunctionTableOp::inner_close()
   row_count_ = 0;
   col_count_ = 0;
   value_table_ = NULL;
+  if (OB_NOT_NULL(file_reader_)) file_reader_->close();
+  if (OB_NOT_NULL(json_reader_)) json_reader_->close();
+  file_reader_ = NULL;
+  json_reader_ = NULL;
+  file_paths_.clear();
   return ret;
 }
 
@@ -212,6 +260,218 @@ int ObFunctionTableOp::inner_get_next_row_sys_func()
   } else {
     MY_SPEC.column_exprs_.at(0)->locate_datum_for_write(eval_ctx_).set_datum(*value);
     MY_SPEC.column_exprs_.at(0)->set_evaluated_projected(eval_ctx_);
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::open_file_reader()
+{
+  int ret = OB_SUCCESS;
+  file_reader_ = NULL;
+  json_reader_ = NULL;
+  file_paths_.clear();
+  next_file_idx_ = 0;
+  file_record_ready_ = false;
+  file_has_record_ = false;
+  file_header_skipped_ = false;
+  const std::string path(MY_SPEC.file_path_.ptr(), MY_SPEC.file_path_.length());
+  const std::string func(MY_SPEC.file_func_name_.ptr(), MY_SPEC.file_func_name_.length());
+  auto validate_path = [this, &ret](const std::string &input_path, std::string &resolved_path) -> int {
+    int path_ret = OB_SUCCESS;
+    char real_buf[PATH_MAX] = {0};
+    const char *real_file = ::realpath(input_path.c_str(), real_buf);
+    ObSQLSessionInfo *session = ctx_.get_my_session();
+    ObString secure_file_priv;
+    if (OB_ISNULL(real_file)) {
+      path_ret = OB_FILE_NOT_EXIST;
+      LOG_ERROR("file SQL runtime realpath failed", K(errno));
+    } else if (OB_ISNULL(session)) {
+      path_ret = OB_ERR_UNEXPECTED;
+    } else if (OB_SUCCESS != (path_ret = session->get_secure_file_priv(secure_file_priv))) {
+    } else {
+      ObString full_path(static_cast<int32_t>(std::strlen(real_file)), real_file);
+      if (OB_SUCCESS != (path_ret = ObResolverUtils::check_secure_path(secure_file_priv, full_path))) {
+        LOG_ERROR("file SQL runtime secure path rejected", K(path_ret));
+      } else {
+        resolved_path.assign(real_file, std::strlen(real_file));
+      }
+    }
+    return path_ret;
+  };
+  if (func == "glob" || func == "GLOB") {
+    std::vector<std::string> discovered_files;
+    if (OB_FAIL(file_sql::discover_files(path, discovered_files))) {
+    } else if (discovered_files.empty()) {
+      ret = OB_FILE_NOT_EXIST;
+    } else {
+      for (const std::string &candidate : discovered_files) {
+        std::string resolved_path;
+        if (OB_FAIL(validate_path(candidate, resolved_path))) {
+          break;
+        } else if (file_paths_.size() >= 4096) {
+          ret = OB_SIZE_OVERFLOW;
+          break;
+        } else {
+          file_paths_.push_back(std::move(resolved_path));
+        }
+      }
+      if (OB_SUCC(ret) && file_paths_.empty()) ret = OB_FILE_NOT_EXIST;
+    }
+  } else if (func == "read_csv" || func == "READ_CSV") {
+    file_sql::CsvOptions options;
+    options.header_ = MY_SPEC.file_csv_header_;
+    options.delimiter_ = MY_SPEC.file_csv_delimiter_;
+    std::string resolved_path;
+    if (OB_FAIL(validate_path(path, resolved_path))) {
+    } else {
+      file_reader_ = &file_reader_obj_;
+      if (OB_FAIL(file_reader_->open(resolved_path, options))) {
+        LOG_ERROR("file SQL CSV reader open failed", K(ret), K(errno));
+        file_reader_ = NULL;
+      }
+    }
+  } else if (func == "read_json" || func == "READ_JSON"
+             || func == "read_ndjson" || func == "READ_NDJSON") {
+    file_sql::JsonOptions options;
+    std::string resolved_path;
+    if (OB_FAIL(validate_path(path, resolved_path))) {
+    } else {
+      json_reader_ = &json_reader_obj_;
+      if (OB_FAIL(json_reader_->open(resolved_path, options))) {
+        json_reader_ = NULL;
+      }
+    }
+  } else {
+    ret = OB_NOT_SUPPORTED;
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::fill_file_datum(const std::string &value, const bool is_null, ObExpr *expr)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(expr)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    ObDatum &datum = expr->locate_datum_for_write(eval_ctx_);
+    if (is_null) {
+      datum.set_null();
+    } else {
+      switch (expr->datum_meta_.type_) {
+        case ObTinyIntType:
+        case ObSmallIntType:
+        case ObMediumIntType:
+        case ObInt32Type:
+        case ObIntType: {
+          int64_t value_int = 0;
+          if (OB_FAIL(parse_file_int(value, value_int))) {
+            if (value == "true" || value == "TRUE") { value_int = 1; ret = OB_SUCCESS; }
+            else if (value == "false" || value == "FALSE") { value_int = 0; ret = OB_SUCCESS; }
+          }
+          if (OB_SUCC(ret)) datum.set_int(value_int);
+          break;
+        }
+        case ObFloatType:
+        case ObDoubleType: {
+          double value_double = 0;
+          if (OB_FAIL(parse_file_double(value, value_double))) {
+          } else { datum.set_double(value_double); }
+          break;
+        }
+        case ObDateType: {
+          ObDateSqlMode mode;
+          int32_t date = 0;
+          if (OB_FAIL(ObTimeConverter::str_to_date(ObString(value.length(), value.data()), date, mode))) {
+          } else { datum.set_date(date); }
+          break;
+        }
+        case ObDateTimeType: {
+          ObTimeConvertCtx cvrt_ctx(NULL, false);
+          int64_t datetime = 0;
+          if (OB_FAIL(ObTimeConverter::str_to_datetime(ObString(value.length(), value.data()), cvrt_ctx,
+                                                       datetime, NULL, cvrt_ctx.date_sql_mode_))) {
+          } else { datum.set_datetime(datetime); }
+          break;
+        }
+        default:
+          {
+            ObExprStrResAlloc res_alloc(*expr, eval_ctx_);
+            const int64_t alloc_size = std::max<int64_t>(1, value.length());
+            char *buffer = static_cast<char *>(res_alloc.alloc(alloc_size));
+            if (OB_ISNULL(buffer)) {
+              ret = OB_ALLOCATE_MEMORY_FAILED;
+            } else {
+              if (!value.empty()) MEMCPY(buffer, value.data(), value.length());
+              datum.set_string(ObString(static_cast<int32_t>(value.length()), buffer));
+            }
+          }
+          break;
+      }
+    }
+    if (OB_SUCC(ret)) expr->set_evaluated_projected(eval_ctx_);
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::inner_get_next_row_file()
+{
+  int ret = OB_SUCCESS;
+  clear_evaluated_flag();
+  if (OB_FAIL(ctx_.check_status())) {
+  } else if (MY_SPEC.file_func_name_.case_compare("glob") == 0) {
+    if (next_file_idx_ >= static_cast<int64_t>(file_paths_.size())) {
+      ret = OB_ITER_END;
+    } else {
+      for (int64_t i = 0; i < MY_SPEC.column_exprs_.count(); ++i) {
+        OZ(fill_file_datum(i == 0 ? file_paths_[next_file_idx_] : std::string(), i != 0,
+                           MY_SPEC.column_exprs_.at(i)));
+      }
+      ++next_file_idx_;
+    }
+  } else if (OB_NOT_NULL(file_reader_)) {
+    bool has_record = false;
+    do {
+      OZ(file_reader_->next(file_record_, has_record));
+      if (OB_FAIL(ret) || !has_record) break;
+      if (MY_SPEC.file_csv_header_ && !file_header_skipped_) {
+        file_header_skipped_ = true;
+        has_record = false;
+        continue;
+      }
+      for (int64_t i = 0; i < MY_SPEC.column_exprs_.count(); ++i) {
+        if (static_cast<size_t>(i) >= file_record_.fields_.size()) {
+          ret = OB_INVALID_DATA;
+          break;
+        }
+        const bool missing = i >= static_cast<int64_t>(file_record_.fields_.size());
+        const file_sql::CsvField *field = missing ? NULL : &file_record_.fields_[i];
+        OZ(fill_file_datum(missing ? std::string() : field->value_,
+                           missing || field->is_null_, MY_SPEC.column_exprs_.at(i)));
+      }
+      if (OB_SUCC(ret)) has_record = true;
+    } while (OB_SUCC(ret) && !has_record);
+    if (OB_SUCC(ret) && !has_record) ret = OB_ITER_END;
+  } else if (OB_NOT_NULL(json_reader_)) {
+    bool has_record = false;
+    OZ(json_reader_->next(json_record_, has_record));
+    if (OB_SUCC(ret) && !has_record) {
+      ret = OB_ITER_END;
+    } else if (OB_SUCC(ret)) {
+      for (int64_t i = 0; i < MY_SPEC.column_exprs_.count(); ++i) {
+        const file_sql::JsonField *field = NULL;
+        for (const file_sql::JsonField &candidate : json_record_.fields_) {
+          if (MY_SPEC.file_column_names_.count() > i
+              && MY_SPEC.file_column_names_.at(i).case_compare(candidate.name_.c_str()) == 0) {
+            field = &candidate;
+            break;
+          }
+        }
+        OZ(fill_file_datum(field == NULL ? std::string() : field->value_,
+                           field == NULL || field->is_null_, MY_SPEC.column_exprs_.at(i)));
+      }
+    }
+  } else {
+    ret = OB_ERR_UNEXPECTED;
   }
   return ret;
 }

@@ -133,6 +133,7 @@ private:
   int process_json_mergepatch_node(const ParseNode *node, ObRawExpr *&expr);
   static void modification_type_to_int(ParseNode &node);
   int process_fun_sys_node(const ParseNode *node, ObRawExpr *&expr, const bool is_root_expr);
+  int process_file_table_function_node(const ParseNode *node, ObRawExpr *&expr);
   int process_match_against(const ParseNode *node, ObRawExpr *&expr);
   int process_match(const ParseNode *node, ObRawExpr *&expr);
   int process_match_score(const ParseNode *node, ObRawExpr *&expr);

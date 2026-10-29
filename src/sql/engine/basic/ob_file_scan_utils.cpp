@@ -32,6 +32,7 @@
 #endif
 
 #include "lib/ob_errno.h"
+#include "lib/utility/ob_macro_utils.h"
 
 namespace oceanbase
 {

@@ -953,6 +953,11 @@ int ObRawExprResolverImpl::do_recursive_resolve(const ParseNode *node,
         }
         break;
       }
+      case T_FILE_TABLE_FUNCTION: {
+        if (OB_FAIL(process_file_table_function_node(node, expr))) {
+        }
+        break;
+      }
       case T_FUN_UDF: {
         ret = OB_ERR_UNEXPECTED;
         LOG_ERROR("A BUG, Never Be Here!!!", K(ret));
@@ -5140,6 +5145,90 @@ int ObRawExprResolverImpl::process_fun_sys_node(const ParseNode *node,
     } else {
       expr = func_expr;
     }
+  }
+  return ret;
+}
+
+int ObRawExprResolverImpl::process_file_table_function_node(const ParseNode *node,
+                                                            ObRawExpr *&expr)
+{
+  int ret = OB_SUCCESS;
+  ObSysFunRawExpr *func_expr = NULL;
+  const ParseNode *func_node = NULL;
+  const ParseNode *arg_list = NULL;
+  if (OB_ISNULL(node) || OB_UNLIKELY(T_FILE_TABLE_FUNCTION != node->type_)
+      || OB_ISNULL(node->children_) || OB_UNLIKELY(node->num_child_ < 1)
+      || OB_ISNULL(func_node = node->children_[0])
+      || OB_UNLIKELY(T_FUN_SYS != func_node->type_)
+      || OB_ISNULL(func_node->children_)
+      || OB_ISNULL(func_node->children_[0])) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(ctx_.expr_factory_.create_raw_expr(T_FILE_TABLE_FUNCTION, func_expr))) {
+  } else if (OB_ISNULL(func_expr)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    ObString name(func_node->children_[0]->str_len_, func_node->children_[0]->str_value_);
+    ObString copied_name;
+    if (OB_FAIL(ob_write_string(ctx_.expr_factory_.get_allocator(), name, copied_name))) {
+    } else {
+      func_expr->set_func_name(copied_name);
+      arg_list = func_node->num_child_ > 1 ? func_node->children_[1] : NULL;
+      const int64_t arg_count = OB_NOT_NULL(arg_list) ? arg_list->num_child_ : 0;
+      int64_t param_count = 0;
+      if (OB_NOT_NULL(arg_list) && OB_UNLIKELY(T_EXPR_LIST != arg_list->type_)) {
+        ret = OB_ERR_PARSER_SYNTAX;
+      } else {
+        for (int64_t i = 0; i < arg_count; ++i) {
+          param_count += arg_list->children_[i] != NULL
+                         && T_ASSIGN_ITEM == arg_list->children_[i]->type_ ? 2 : 1;
+        }
+      }
+      if (OB_SUCC(ret) && OB_FAIL(func_expr->init_param_exprs(param_count))) {
+      } else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < arg_count; ++i) {
+          const ParseNode *arg_node = arg_list->children_[i];
+          const ParseNode *value_node = arg_node;
+          ObRawExpr *arg_expr = NULL;
+          if (OB_ISNULL(arg_node)) {
+            ret = OB_ERR_PARSER_SYNTAX;
+          } else if (T_ASSIGN_ITEM == arg_node->type_) {
+            // Named arguments are represented by their value in the expression
+            // tree.  The table-function resolver retains the parse node for
+            // option validation before execution.
+            if (OB_ISNULL(arg_node->children_) || OB_ISNULL(arg_node->children_[1])) {
+              ret = OB_ERR_PARSER_SYNTAX;
+            } else {
+              ObConstRawExpr *key_expr = NULL;
+              ObString key(arg_node->children_[0]->str_len_, arg_node->children_[0]->str_value_);
+              if (OB_FAIL(ObRawExprUtils::build_const_string_expr(ctx_.expr_factory_, ObVarcharType,
+                                                                  key, CS_TYPE_UTF8MB4_BIN, key_expr))) {
+              } else if (OB_ISNULL(key_expr)) {
+                ret = OB_ERR_UNEXPECTED;
+              } else if (OB_FAIL(func_expr->add_param_expr(key_expr))) {
+              }
+              value_node = arg_node->children_[1];
+            }
+          } else if (T_EXPR_WITH_ALIAS == arg_node->type_) {
+            ret = OB_ERR_FUNCTION_UNKNOWN;
+          }
+          if (OB_SUCC(ret)) {
+            if (OB_FAIL(SMART_CALL(recursive_resolve(value_node, arg_expr)))) {
+            } else if (OB_FAIL(func_expr->add_param_expr(arg_expr))) {
+            }
+          }
+        }
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    // The concrete output columns are attached by the table resolver.  A
+    // scalar metadata type keeps generic expression handling well-defined.
+    ObRawExprResType result_type;
+    result_type.set_varchar();
+    result_type.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+    result_type.set_collation_level(CS_LEVEL_IMPLICIT);
+    func_expr->set_result_type(result_type);
+    expr = func_expr;
   }
   return ret;
 }

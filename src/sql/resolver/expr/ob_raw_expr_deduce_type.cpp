@@ -1966,6 +1966,10 @@ int ObRawExprDeduceType::adjust_cast_as_signed_unsigned(ObSysFunRawExpr &expr)
 int ObRawExprDeduceType::visit(ObSysFunRawExpr &expr)
 {
   int ret = OB_SUCCESS;
+    if (T_FILE_TABLE_FUNCTION == expr.get_expr_type()) {
+      // File table functions are consumed by ObLogFunctionTable and have no scalar operator.
+      return ret;
+    }
   ObExprOperator *op = expr.get_op();
   if (OB_ISNULL(my_session_)) {
     ret = OB_ERR_UNEXPECTED;
