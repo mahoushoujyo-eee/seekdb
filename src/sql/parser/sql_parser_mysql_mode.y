@@ -17504,6 +17504,14 @@ simple_expr
 {
   $$ = $1;
 }
+| FORMAT COMP_EQ simple_expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_ASSIGN_ITEM, 2, $1, $3);
+}
+| FORMAT FILE_ARROW simple_expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_ASSIGN_ITEM, 2, $1, $3);
+}
 | relation_name FILE_ARROW simple_expr
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_ASSIGN_ITEM, 2, $1, $3);
