@@ -4100,7 +4100,11 @@ int ObDMLResolver::resolve_file_table_function_item(const ParseNode &parse_tree,
       for (int64_t i = 0; OB_SUCC(ret) && i < arg_list->num_child_; ++i) {
         const ParseNode *arg = arg_list->children_[i];
         if (OB_ISNULL(arg)) ret = OB_INVALID_ARGUMENT;
-        else if (arg->type_ == T_ASSIGN_ITEM) {
+        else if (arg->type_ != T_ASSIGN_ITEM) {
+          // The path is the only positional argument.  A second positional
+          // argument is a syntax error rather than an ignored format name.
+          if (i > 0) ret = OB_ERR_PARSE_SQL;
+        } else {
           if (arg->num_child_ < 2 || OB_ISNULL(arg->children_[0]) || OB_ISNULL(arg->children_[1])) {
             ret = OB_INVALID_ARGUMENT;
           } else {
@@ -4127,7 +4131,27 @@ int ObDMLResolver::resolve_file_table_function_item(const ParseNode &parse_tree,
               if (v->type_ == T_VARCHAR || v->type_ == T_CHAR || v->type_ == T_QUESTIONMARK) {
                 if (v->str_len_ != 1) ret = OB_INVALID_ARGUMENT;
                 else csv_options.delimiter_ = v->str_value_[0];
+              } else {
+                ret = OB_ERR_PARSE_SQL;
               }
+            } else if (key.case_compare("format") == 0) {
+              const ParseNode *v = arg->children_[1];
+              const bool is_string = v->type_ == T_VARCHAR || v->type_ == T_CHAR
+                                     || v->type_ == T_QUESTIONMARK;
+              const ObString format(is_string ? v->str_len_ : 0,
+                                    is_string ? v->str_value_ : "");
+              if (!is_string
+                  || (func_name.case_compare("read_csv") == 0
+                      && format.case_compare("csv") != 0)
+                  || ((func_name.case_compare("read_json") == 0
+                       || func_name.case_compare("read_ndjson") == 0)
+                      && format.case_compare("newline_delimited") != 0
+                      && format.case_compare("ndjson") != 0
+                      && format.case_compare("jsonl") != 0)) {
+                ret = OB_ERR_PARSE_SQL;
+              }
+            } else {
+              ret = OB_ERR_PARSE_SQL;
             }
           }
         }
