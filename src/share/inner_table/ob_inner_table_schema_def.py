@@ -2447,6 +2447,62 @@ all_ai_model_endpoint_def = dict(
 )
 def_table_schema(**all_ai_model_endpoint_def)
 
+# AI COLUMN definitions are kept in schema tables so the SQL layer can expose
+# the asynchronous materialization contract without changing user table
+# layouts.  The task table is intentionally append/update friendly: workers
+# claim rows by task_id and remove them after a successful or terminal run.
+all_ai_column_def = dict(
+    owner = 'seekdb.ai',
+    table_name = '__all_ai_column',
+    table_id = '1131',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+      ('table_id', 'int'),
+      ('column_id', 'int')
+    ],
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+      ('column_name', 'varchar:128', 'false'),
+      ('model_name', 'varchar:128', 'true'),
+      ('sync_mode', 'varchar:32', 'false', 'async'),
+      ('max_retries', 'int', 'false', '0'),
+      ('state_column_id', 'int', 'false', '0'),
+      ('request_column_id', 'int', 'false', '0'),
+      ('result_spec_column_id', 'int', 'false', '0'),
+      ('status_column_id', 'int', 'false', '0'),
+      ('dimension', 'int', 'false', '0'),
+      ('normalized_expr', 'longtext', 'true'),
+      ('dependency_columns', 'longtext', 'true')
+    ]
+)
+def_table_schema(**all_ai_column_def)
+
+all_ai_column_task_def = dict(
+    owner = 'seekdb.ai',
+    table_name = '__all_ai_column_task',
+    table_id = '1132',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+      ('task_id', 'int')
+    ],
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+      ('table_id', 'int', 'false'),
+      ('column_id', 'int', 'false'),
+      ('request_id', 'varchar:128', 'false'),
+      ('rowkey_predicate', 'varchar:4000', 'false'),
+      ('eligible_ts', 'timestamp', 'false'),
+      ('state', 'int', 'false', '0'),
+      ('retry_count', 'int', 'false', '0'),
+      ('last_error', 'varchar:4000', 'true')
+    ]
+)
+def_table_schema(**all_ai_column_task_def)
+
 
 all_objauth_mysql_def = dict(
     owner = 'cjl476581',

@@ -1907,11 +1907,19 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
         } else if (!is_ai_column) {
           column.add_column_flag(VIRTUAL_GENERATED_COLUMN_FLAG);
         } else {
-          /* AI columns are materialized asynchronously.  Keep the prompt in
-           * the current default value for schema persistence, but do not mark
-           * the user column as a generated column (that would make the SQL
-           * engine evaluate the remote function during ordinary DML). */
-          column.add_column_flag(AI_COLUMN_FLAG);
+          /* Keep the prompt in extended_type_info_ and leave the user column
+           * without a default.  The latter is essential: ordinary INSERT
+           * must create a NULL result and an asynchronous task, rather than
+           * trying to insert the prompt text into the result column. */
+          if (OB_FAIL(column.add_type_info(expr_str))) {
+          } else {
+            ObObj null_value;
+            null_value.set_null();
+            if (OB_FAIL(column.set_cur_default_value(null_value, false))) {
+            } else {
+              column.add_column_flag(AI_COLUMN_FLAG);
+            }
+          }
         }
       }
       if (OB_SUCC(ret) && is_pad_char_to_full_length(session_info_->get_sql_mode())) {
