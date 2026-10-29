@@ -17504,17 +17504,15 @@ simple_expr
 {
   $$ = $1;
 }
-| FORMAT COMP_EQ simple_expr
-{
-  malloc_non_terminal_node($$, result->malloc_pool_, T_ASSIGN_ITEM, 2, $1, $3);
-}
-| FORMAT FILE_ARROW simple_expr
-{
-  malloc_non_terminal_node($$, result->malloc_pool_, T_ASSIGN_ITEM, 2, $1, $3);
-}
 | relation_name FILE_ARROW simple_expr
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_ASSIGN_ITEM, 2, $1, $3);
+}
+| FORMAT COMP_EQ simple_expr
+{
+  ParseNode *name_node = NULL;
+  get_non_reserved_node(name_node, result->malloc_pool_, @1.first_column, @1.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_ASSIGN_ITEM, 2, name_node, $3);
 }
 | NAME_OB COMP_EQ simple_expr
 {
@@ -17791,7 +17789,7 @@ ACCOUNT
 |       FIXED
 |       FLUSH
 |       FOLLOWING
-|       FORMAT
+|       FORMAT %prec LOWER_THAN_COMP
 |       FROZEN
 |       FOUND
 |       FRAGMENTATION

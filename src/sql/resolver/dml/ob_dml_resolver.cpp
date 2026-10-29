@@ -4124,8 +4124,29 @@ int ObDMLResolver::resolve_file_table_function_item(const ParseNode &parse_tree,
                                        && v->children_[0]->str_value_[0] == '1'));
               }
               if (!is_minus_one) ret = OB_NOT_SUPPORTED;
-            } else if (key.case_compare("header") == 0 && arg->children_[1]->type_ == T_BOOL) {
-              csv_options.header_ = arg->children_[1]->value_ != 0;
+            } else if (key.case_compare("header") == 0) {
+              const ParseNode *v = arg->children_[1];
+              if (v->type_ == T_BOOL) {
+                csv_options.header_ = v->value_ != 0;
+              } else if ((v->type_ == T_INT || v->type_ == T_UINT64)
+                         && (v->value_ == 0 || v->value_ == 1)) {
+                csv_options.header_ = v->value_ != 0;
+              } else {
+                ObString bool_text;
+                if (v->type_ == T_QUESTIONMARK && OB_NOT_NULL(v->raw_text_)
+                    && v->text_len_ > 0) {
+                  bool_text.assign_ptr(v->raw_text_, static_cast<int32_t>(v->text_len_));
+                } else if (OB_NOT_NULL(v->str_value_) && v->str_len_ > 0) {
+                  bool_text.assign_ptr(v->str_value_, v->str_len_);
+                }
+                if (bool_text.case_compare("true") == 0 || bool_text.case_compare("1") == 0) {
+                  csv_options.header_ = true;
+                } else if (bool_text.case_compare("false") == 0 || bool_text.case_compare("0") == 0) {
+                  csv_options.header_ = false;
+                } else {
+                  ret = OB_ERR_PARSE_SQL;
+                }
+              }
             } else if (key.case_compare("delimiter") == 0) {
               const ParseNode *v = arg->children_[1];
               if (v->type_ == T_VARCHAR || v->type_ == T_CHAR || v->type_ == T_QUESTIONMARK) {
