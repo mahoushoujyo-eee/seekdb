@@ -1773,6 +1773,10 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
                                              const bool allow_has_default)
 {
   int ret = OB_SUCCESS;
+  const bool is_ai_column = node != NULL && node->num_child_ == GEN_COLUMN_DEFINITION_NUM_CHILD
+                         && node->children_ != NULL && node->children_[4] != NULL
+                         && node->children_[4]->type_ == T_GENERATED_COLUMN
+                         && node->children_[4]->value_ == 1;
   bool is_modify_column = stmt::T_ALTER_TABLE == stmt_->get_stmt_type()
                   && OB_DDL_MODIFY_COLUMN == (static_cast<AlterColumnSchema &>(column)).alter_type_;
   ParseNode *column_definition_ref_node = NULL;
@@ -1898,10 +1902,16 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
         if (OB_FAIL(column.set_cur_default_value(
                 default_value,
                 column.is_default_expr_v2_column()))) {
-        } else if (node->children_[4] != NULL && node->children_[4]->type_ == T_STORED_COLUMN) {
+        } else if (!is_ai_column && node->children_[4] != NULL && node->children_[4]->type_ == T_STORED_COLUMN) {
           column.add_column_flag(STORED_GENERATED_COLUMN_FLAG);
-        } else {
+        } else if (!is_ai_column) {
           column.add_column_flag(VIRTUAL_GENERATED_COLUMN_FLAG);
+        } else {
+          /* AI columns are materialized asynchronously.  Keep the prompt in
+           * the current default value for schema persistence, but do not mark
+           * the user column as a generated column (that would make the SQL
+           * engine evaluate the remote function during ordinary DML). */
+          column.add_column_flag(AI_COLUMN_FLAG);
         }
       }
       if (OB_SUCC(ret) && is_pad_char_to_full_length(session_info_->get_sql_mode())) {
