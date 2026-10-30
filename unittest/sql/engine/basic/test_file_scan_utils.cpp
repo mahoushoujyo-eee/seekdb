@@ -20,9 +20,13 @@
 #include <cstdio>
 #include <fstream>
 #include <vector>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #include "lib/ob_errno.h"
 #include "gtest/gtest.h"
+#include "file_sql_parquet_fixtures.h"
 
 namespace oceanbase
 {
@@ -197,6 +201,181 @@ TEST(TestFileScanUtils, reports_jsonl_bad_line_and_file_discovery)
   ASSERT_EQ(OB_SUCCESS, discover_files(pattern, files));
   EXPECT_GE(files.size(), 2U);
 }
+
+TEST(TestFileScanUtils, preserves_numeric_boundaries_and_validates_dates)
+{
+  TemporaryCsv file;
+  ASSERT_TRUE(file.write("lo,hi,overflow,day,invalid_day,all_null\n"
+                        "-9223372036854775808,9223372036854775807,9223372036854775808,2024-02-29,2026-02-29,\n"));
+  CsvOptions options;
+  std::vector<CsvColumn> columns;
+  ASSERT_EQ(OB_SUCCESS, infer_csv_schema(file.path(), options, columns));
+  ASSERT_EQ(6U, columns.size());
+  EXPECT_EQ(InferredType::BIGINT, columns[0].type_);
+  EXPECT_EQ(InferredType::BIGINT, columns[1].type_);
+  EXPECT_EQ(InferredType::VARCHAR, columns[2].type_);
+  EXPECT_EQ(InferredType::DATE, columns[3].type_);
+  EXPECT_EQ(InferredType::VARCHAR, columns[4].type_);
+  EXPECT_EQ(InferredType::NULL_TYPE, columns[5].type_);
+}
+
+TEST(TestFileScanUtils, enforces_record_limits_and_utf8)
+{
+  TemporaryCsv file;
+  ASSERT_TRUE(file.write("a;b\n1;\"say \\\"hi\\\"\"\n"));
+  CsvOptions options;
+  options.delimiter_ = ';';
+  options.escape_ = '\\';
+  std::vector<CsvColumn> columns;
+  ASSERT_EQ(OB_SUCCESS, infer_csv_schema(file.path(), options, columns));
+  EXPECT_EQ(2U, columns.size());
+  ASSERT_TRUE(file.write("x\n123456789\n"));
+  options.max_field_bytes_ = 4;
+  EXPECT_EQ(OB_SIZE_OVERFLOW, infer_csv_schema(file.path(), options, columns));
+  options = CsvOptions();
+  ASSERT_TRUE(file.write(std::string("x\n") + char(0xc0) + char(0xaf) + "\n"));
+  EXPECT_EQ(OB_INVALID_DATA, infer_csv_schema(file.path(), options, columns));
+}
+
+TEST(TestFileScanUtils, reads_custom_quotes_escape_and_null_text)
+{
+  TemporaryCsv file;
+  ASSERT_TRUE(file.write("id;note\n1;'hello;world'\n2;'say \\'hi\\''\n3;MISSING\n4;'MISSING'\n"));
+  CsvOptions options;
+  options.delimiter_ = ';';
+  options.quote_ = '\'';
+  options.escape_ = '\\';
+  options.null_string_ = "MISSING";
+  CsvReader reader;
+  ASSERT_EQ(OB_SUCCESS, reader.open(file.path(), options));
+  CsvRecord row;
+  bool has_row = false;
+  ASSERT_EQ(OB_SUCCESS, reader.next(row, has_row));
+  const char *expected[] = {"hello;world", "say 'hi'", "MISSING", "MISSING"};
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_EQ(OB_SUCCESS, reader.next(row, has_row));
+    ASSERT_TRUE(has_row);
+    ASSERT_EQ(2U, row.fields_.size());
+    EXPECT_EQ(expected[i], row.fields_[1].value_);
+    EXPECT_EQ(i == 2, row.fields_[1].is_null_);
+  }
+}
+
+TEST(TestFileScanUtils, decodes_snappy_nullable_and_dictionary_pages)
+{
+  for (int version = 1; version <= 2; ++version) {
+    SCOPED_TRACE(version);
+    TemporaryCsv file;
+    ASSERT_TRUE(file.write(version == 1
+      ? std::string(reinterpret_cast<const char *>(PARQUET_V1), sizeof(PARQUET_V1))
+      : std::string(reinterpret_cast<const char *>(PARQUET_V2), sizeof(PARQUET_V2))));
+    std::vector<CsvColumn> columns;
+    ASSERT_EQ(OB_SUCCESS, infer_parquet_schema(file.path(), columns));
+    ASSERT_EQ(6U, columns.size());
+    EXPECT_EQ(InferredType::BIGINT, columns[0].type_);
+    EXPECT_EQ(InferredType::VARCHAR, columns[1].type_);
+    EXPECT_EQ(InferredType::BOOLEAN, columns[2].type_);
+    EXPECT_EQ(InferredType::DOUBLE, columns[3].type_);
+    EXPECT_EQ(InferredType::DATE, columns[4].type_);
+    EXPECT_EQ(InferredType::DATETIME, columns[5].type_);
+    EXPECT_TRUE(columns[1].nullable_);
+    ParquetReader reader;
+    ASSERT_EQ(OB_SUCCESS, reader.open(file.path(), {"id", "name", "active", "score", "day", "created"}));
+    const char *names[] = {"alpha", "", "alpha", "beta", "", "beta"};
+    const char *active[] = {"true", "false", "", "true", "false", "true"};
+    const char *scores[] = {"1.5", "", "3.25", "4", "5.5", "6"};
+    for (int i = 0; i < 6; ++i) {
+      ParquetRecord row;
+      bool has_row = false;
+      ASSERT_EQ(OB_SUCCESS, reader.next(row, has_row));
+      ASSERT_TRUE(has_row);
+      ASSERT_EQ(6U, row.fields_.size());
+      EXPECT_EQ(std::to_string(i + 1), row.fields_[0].value_);
+      EXPECT_EQ(i == 1, row.fields_[1].is_null_);
+      EXPECT_EQ(names[i], row.fields_[1].value_);
+      EXPECT_EQ(i == 2, row.fields_[2].is_null_);
+      EXPECT_EQ(active[i], row.fields_[2].value_);
+      EXPECT_EQ(i == 1, row.fields_[3].is_null_);
+      EXPECT_EQ(scores[i], row.fields_[3].value_);
+      EXPECT_EQ(i % 3 == 1, row.fields_[4].is_null_);
+      EXPECT_EQ(i % 3 == 1, row.fields_[5].is_null_);
+      if (i % 3 == 0) {
+        EXPECT_EQ("2026-08-01", row.fields_[4].value_);
+        EXPECT_EQ("2026-08-01 10:11:12.123456", row.fields_[5].value_);
+      } else if (i % 3 == 2) {
+        EXPECT_EQ("1969-12-31", row.fields_[4].value_);
+        EXPECT_EQ("1969-12-31 23:59:59.999999", row.fields_[5].value_);
+      }
+    }
+    ParquetRecord row;
+    bool has_row = true;
+    ASSERT_EQ(OB_SUCCESS, reader.next(row, has_row));
+    EXPECT_FALSE(has_row);
+    // Reopening resets the cursor; only requested columns are decoded.
+    ASSERT_EQ(OB_SUCCESS, reader.open(file.path(), {"name"}));
+    ASSERT_EQ(OB_SUCCESS, reader.next(row, has_row));
+    ASSERT_TRUE(has_row);
+    ASSERT_EQ(1U, row.fields_.size());
+    EXPECT_EQ("alpha", row.fields_[0].value_);
+    ASSERT_TRUE(file.write("changed"));
+    EXPECT_EQ(OB_ERR_UNEXPECTED, reader.next(row, has_row));
+  }
+}
+
+TEST(TestFileScanUtils, prunes_unselected_parquet_column_pages)
+{
+  TemporaryCsv file;
+  std::string data(reinterpret_cast<const char *>(PARQUET_V1), sizeof(PARQUET_V1));
+  data[PARQUET_V1_NAME_OFFSET] = 0; // Invalid page header in a column we do not read.
+  ASSERT_TRUE(file.write(data));
+  ParquetReader reader;
+  ASSERT_EQ(OB_SUCCESS, reader.open(file.path(), {"id"}));
+  for (int i = 1; i <= 6; ++i) {
+    ParquetRecord row;
+    bool has_row = false;
+    ASSERT_EQ(OB_SUCCESS, reader.next(row, has_row));
+    ASSERT_TRUE(has_row);
+    ASSERT_EQ(1U, row.fields_.size());
+    EXPECT_EQ(std::to_string(i), row.fields_[0].value_);
+  }
+  ASSERT_EQ(OB_SUCCESS, reader.open(file.path(), {"name"}));
+  ParquetRecord row;
+  bool has_row = false;
+  EXPECT_NE(OB_SUCCESS, reader.next(row, has_row));
+}
+
+TEST(TestFileScanUtils, streams_parquet_pages_in_one_row_group)
+{
+  TemporaryCsv file;
+  const std::string data(reinterpret_cast<const char *>(PARQUET_STREAMING), sizeof(PARQUET_STREAMING));
+  ASSERT_TRUE(file.write(data));
+  ParquetReader reader;
+  ASSERT_EQ(OB_SUCCESS, reader.open(file.path(), {"id"}));
+  ParquetRecord row;
+  bool has_row = false;
+  for (int i = 0; i < 512; ++i) {
+    ASSERT_EQ(OB_SUCCESS, reader.next(row, has_row));
+    ASSERT_TRUE(has_row);
+    EXPECT_EQ(std::to_string(i), row.fields_[0].value_);
+  }
+  ASSERT_EQ(OB_SUCCESS, reader.next(row, has_row));
+  EXPECT_FALSE(has_row);
+}
+
+#if !defined(_WIN32)
+TEST(TestFileScanUtils, requires_secure_directory_and_path_boundary)
+{
+  char cwd[4096] = {0};
+  ASSERT_NE(nullptr, ::getcwd(cwd, sizeof(cwd)));
+  const std::string root(cwd);
+  EXPECT_EQ(OB_SUCCESS, check_secure_file_path(".", root + "/allowed.csv"));
+  EXPECT_NE(OB_SUCCESS, check_secure_file_path(".", root + "_sibling/denied.csv"));
+  EXPECT_NE(OB_SUCCESS, check_secure_file_path("", root + "/denied.csv"));
+  EXPECT_NE(OB_SUCCESS, check_secure_file_path("NULL", root + "/denied.csv"));
+  EXPECT_EQ(root, glob_search_root(root + "/*/file?.csv"));
+  EXPECT_EQ(".", glob_search_root("*.csv"));
+}
+#endif
 
 } // namespace file_sql
 } // namespace sql

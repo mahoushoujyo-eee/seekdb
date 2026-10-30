@@ -30,12 +30,14 @@
 #include <new>
 #include <sstream>
 #include <iomanip>
+#include <limits.h>
 #include <sys/stat.h>
 #if !defined(_WIN32)
 #include <glob.h>
 #endif
 
 #include "lib/ob_errno.h"
+#include "share/ob_errno.h"
 #include "lib/utility/ob_macro_utils.h"
 
 namespace oceanbase
@@ -49,6 +51,9 @@ namespace
 constexpr int64_t DEFAULT_MAX_RECORD_BYTES = 16 * 1024 * 1024;
 constexpr int64_t DEFAULT_MAX_FIELD_BYTES = 4 * 1024 * 1024;
 constexpr int64_t DEFAULT_MAX_COLUMNS = 4096;
+constexpr int64_t MAX_PARQUET_PAGE_BYTES = 16 * 1024 * 1024;
+constexpr int64_t MAX_PARQUET_PAGE_VALUES = 262144;
+constexpr int64_t MAX_PARQUET_BUFFER_BYTES = 64 * 1024 * 1024;
 
 struct FileIdentity
 {
@@ -525,6 +530,7 @@ CsvOptions::CsvOptions()
   , escape_('"')
   , header_(true)
   , empty_as_null_(true)
+  , null_string_("NULL")
   , max_record_bytes_(DEFAULT_MAX_RECORD_BYTES)
   , max_field_bytes_(DEFAULT_MAX_FIELD_BYTES)
   , max_columns_(DEFAULT_MAX_COLUMNS)
@@ -666,7 +672,7 @@ int CsvReader::next(CsvRecord &record, bool &has_record)
         } else {
           CsvField &last = record.fields_.back();
           last.value_ = std::move(field_value);
-          last.is_null_ = !last.quoted_ && (last.value_ == "NULL"
+          last.is_null_ = !last.quoted_ && (last.value_ == options_.null_string_
                               || (options_.empty_as_null_ && last.value_.empty()));
           has_record = true;
         }
@@ -733,7 +739,7 @@ int CsvReader::next(CsvRecord &record, bool &has_record)
           } else {
             CsvField &last = record.fields_.back();
             last.value_ = std::move(field_value);
-            last.is_null_ = !last.quoted_ && (last.value_ == "NULL"
+            last.is_null_ = !last.quoted_ && (last.value_ == options_.null_string_
                                 || (options_.empty_as_null_ && last.value_.empty()));
             field_value.clear();
             field_quoted = false;
@@ -750,7 +756,7 @@ int CsvReader::next(CsvRecord &record, bool &has_record)
           } else {
             CsvField &last = record.fields_.back();
             last.value_ = std::move(field_value);
-            last.is_null_ = !last.quoted_ && (last.value_ == "NULL"
+            last.is_null_ = !last.quoted_ && (last.value_ == options_.null_string_
                                 || (options_.empty_as_null_ && last.value_.empty()));
             has_record = true;
           }
@@ -777,6 +783,9 @@ int CsvReader::next(CsvRecord &record, bool &has_record)
           ret = OB_SIZE_OVERFLOW;
         }
       }
+    }
+    for (size_t i = 0; OB_SUCC(ret) && has_record && i < record.fields_.size(); ++i) {
+      if (!valid_utf8(record.fields_[i].value_)) ret = OB_INVALID_DATA;
     }
     if (OB_SUCC(ret) && has_record) {
       record.line_number_ = record_start_line_;
@@ -1017,6 +1026,40 @@ int infer_jsonl_schema(const std::string &path,
   return ret;
 }
 
+std::string glob_search_root(const std::string &pattern)
+{
+  const size_t wildcard = pattern.find_first_of("*?[");
+  const size_t slash = pattern.rfind('/', wildcard == std::string::npos ? pattern.size() : wildcard);
+  return slash == std::string::npos ? "." : slash == 0 ? "/" : pattern.substr(0, slash);
+}
+
+int check_secure_file_path(const std::string &directory, const std::string &canonical_path)
+{
+  int ret = OB_SUCCESS;
+  char resolved[PATH_MAX] = {0};
+  struct stat st;
+  // File SQL deliberately does not inherit ordinary OUTFILE's server log allowlist.
+  if (directory.empty() || directory.find('\0') != std::string::npos
+      || canonical_path.find('\0') != std::string::npos) {
+    ret = OB_ERR_NO_PRIVILEGE;
+#if defined(_WIN32)
+  } else if (::_fullpath(resolved, directory.c_str(), sizeof(resolved)) == nullptr) {
+#else
+  } else if (::realpath(directory.c_str(), resolved) == nullptr) {
+#endif
+    ret = OB_ERR_NO_PRIVILEGE;
+  } else if (::stat(resolved, &st) != 0 || !S_ISDIR(st.st_mode)) {
+    ret = OB_ERR_NO_PRIVILEGE;
+  } else {
+    const std::string root(resolved);
+    if (canonical_path.compare(0, root.size(), root) != 0
+        || (root != "/" && canonical_path.size() > root.size() && canonical_path[root.size()] != '/')) {
+      ret = OB_ERR_NO_PRIVILEGE;
+    }
+  }
+  return ret;
+}
+
 int discover_files(const std::string &pattern, std::vector<std::string> &files)
 {
   int ret = OB_SUCCESS;
@@ -1041,7 +1084,8 @@ int discover_files(const std::string &pattern, std::vector<std::string> &files)
         if (0 != ::stat(result.gl_pathv[i], &st)) {
           ret = OB_FILE_NOT_EXIST;
         } else if (S_ISREG(st.st_mode)) {
-          files.push_back(result.gl_pathv[i]);
+          if (files.size() >= 4096) ret = OB_SIZE_OVERFLOW;
+          else files.push_back(result.gl_pathv[i]);
         }
       }
       std::sort(files.begin(), files.end());
@@ -1328,7 +1372,7 @@ int snappy_uncompress(const std::string &input, std::string &output)
       length_done = (byte & 0x80) == 0;
     }
   }
-  if (OB_SUCC(ret) && (!length_done || expected > 64 * 1024 * 1024)) ret = OB_SIZE_OVERFLOW;
+  if (OB_SUCC(ret) && (!length_done || expected > MAX_PARQUET_PAGE_BYTES)) ret = OB_SIZE_OVERFLOW;
   output.clear();
   if (OB_SUCC(ret)) output.reserve(static_cast<size_t>(expected));
   while (OB_SUCC(ret) && pos < input.size() && output.size() < expected) {
@@ -1361,6 +1405,7 @@ int snappy_uncompress(const std::string &input, std::string &output)
     } else {
       length = 1 + (tag >> 2);
       if (kind == 1) {
+        length = 4 + ((tag >> 2) & 7);
         if (pos >= input.size()) ret = OB_INVALID_DATA;
         else {
           offset = (static_cast<uint64_t>(tag & 0xe0) << 3)
@@ -1438,7 +1483,7 @@ InferredType parquet_inferred_type(int32_t physical_type, int32_t converted_type
   switch (physical_type) {
     case 0: type = InferredType::BOOLEAN; break;
     case 1: type = converted_type == 6 ? InferredType::DATE : InferredType::BIGINT; break;
-    case 2: type = converted_type == 9 || converted_type == 10
+    case 2: type = converted_type == 9 || converted_type == 10 || converted_type == 100
                       ? InferredType::DATETIME : InferredType::BIGINT; break;
     case 4:
     case 5: type = InferredType::DOUBLE; break;
@@ -1518,7 +1563,18 @@ int parse_parquet_metadata(const std::string &path, ParquetMetadata &metadata)
       const int64_t physical_type = compact_int(element, 1, -1);
       const int64_t repetition = compact_int(element, 3, 0);
       const int64_t children = compact_int(element, 5, 0);
-      const int64_t converted = compact_int(element, 6, -1);
+      int64_t converted = compact_int(element, 6, -1);
+      const CompactValue *logical = compact_field(element, 10);
+      if (logical != nullptr) {
+        if (compact_field(*logical, 6) != nullptr) converted = 6;
+        const CompactValue *timestamp = compact_field(*logical, 8);
+        const CompactValue *unit = timestamp == nullptr ? nullptr : compact_field(*timestamp, 2);
+        if (unit != nullptr) {
+          if (compact_field(*unit, 1) != nullptr) converted = 9;
+          else if (compact_field(*unit, 2) != nullptr) converted = 10;
+          else if (compact_field(*unit, 3) != nullptr) converted = 100;
+        }
+      }
       const int64_t type_length = compact_int(element, 2, 0);
       if (name == nullptr || name->kind_ != CompactKind::BINARY || name->binary_.empty()
           || physical_type < 0 || physical_type > 7 || physical_type == 3 || children != 0
@@ -1584,7 +1640,15 @@ int parse_parquet_metadata(const std::string &path, ParquetMetadata &metadata)
         if (OB_SUCC(ret)) metadata.row_groups_.push_back(std::move(group));
       }
     }
-    if (OB_SUCC(ret)) ret = get_file_identity(path, metadata.identity_);
+    if (OB_SUCC(ret)) {
+      FileIdentity current;
+      if (OB_FAIL(get_file_identity(path, current))) {
+      } else if (current.device_ != metadata.identity_.device_ || current.inode_ != metadata.identity_.inode_
+                 || current.size_ != metadata.identity_.size_ || current.modified_sec_ != metadata.identity_.modified_sec_
+                 || current.modified_nsec_ != metadata.identity_.modified_nsec_) {
+        ret = OB_ERR_UNEXPECTED;
+      }
+    }
   }
   return ret;
 }
@@ -1611,6 +1675,17 @@ int infer_parquet_schema(const std::string &path, std::vector<CsvColumn> &column
 
 namespace
 {
+struct ParquetColumnCursor
+{
+  ParquetColumnCursor() : offset_(0), values_read_(0), buffered_bytes_(0), row_index_(0) {}
+  int64_t offset_;
+  int64_t values_read_;
+  int64_t buffered_bytes_;
+  size_t row_index_;
+  std::vector<ParquetField> values_;
+  std::vector<std::string> dictionary_;
+};
+
 struct ParquetImpl
 {
   ParquetImpl()
@@ -1620,7 +1695,7 @@ struct ParquetImpl
   std::ifstream input_;
   ParquetMetadata metadata_;
   std::vector<size_t> selected_columns_;
-  std::vector<std::vector<ParquetField>> column_values_;
+  std::vector<ParquetColumnCursor> cursors_;
   size_t row_group_index_;
   size_t row_index_;
   FileIdentity identity_;
@@ -1635,7 +1710,7 @@ int decode_hybrid(const std::string &input,
 {
   int ret = OB_SUCCESS;
   values.clear();
-  if (bit_width < 0 || bit_width > 32 || expected_count < 0 || expected_count > 1000000000LL) {
+  if (bit_width < 0 || bit_width > 32 || expected_count < 0 || expected_count > MAX_PARQUET_PAGE_VALUES) {
     ret = OB_INVALID_ARGUMENT;
   } else if (bit_width == 0) {
     values.assign(static_cast<size_t>(expected_count), 0);
@@ -1669,12 +1744,16 @@ int decode_hybrid(const std::string &input,
         }
       } else {
         const size_t groups = static_cast<size_t>(header >> 1);
+        if (groups > (static_cast<size_t>(expected_count) + 7) / 8) {
+          ret = OB_INVALID_DATA;
+          break;
+        }
         const size_t count = groups * 8;
         const size_t bytes = (count * static_cast<size_t>(bit_width) + 7) / 8;
         const size_t remaining = static_cast<size_t>(expected_count) - values.size();
         // Bit-packed groups are eight values wide and may contain padding in
         // the final group when the row count is not a multiple of eight.
-        if (groups == 0 || count < remaining || count - remaining >= 8
+        if (groups == 0 || (count > remaining && count - remaining >= 8)
             || pos + bytes > input.size()) {
           ret = OB_INVALID_DATA;
         } else {
@@ -1814,8 +1893,8 @@ int decode_data_page(const std::string &payload,
                      std::vector<ParquetField> &values)
 {
   int ret = OB_SUCCESS;
-  if (num_values < 0 || num_values > 1000000000) {
-    ret = OB_INVALID_DATA;
+  if (num_values < 0 || num_values > MAX_PARQUET_PAGE_VALUES) {
+    ret = OB_SIZE_OVERFLOW;
   } else {
     size_t pos = 0;
     std::vector<int32_t> repetition;
@@ -1832,16 +1911,14 @@ int decode_data_page(const std::string &payload,
       if (pos >= payload.size()) ret = OB_INVALID_DATA;
       else {
         const int32_t index_width = static_cast<int32_t>(static_cast<uint8_t>(payload[pos++]));
-        uint32_t encoded_length = 0;
         int64_t non_null_count = num_values;
         if (max_definition_level > 0) {
           non_null_count = 0;
           for (int32_t level : definition) non_null_count += level == max_definition_level;
         }
-        if (!read_little_u32(payload, pos, encoded_length) || encoded_length > payload.size() - pos) {
-          ret = OB_INVALID_DATA;
-        } else {
-          const std::string encoded(payload.data() + pos, encoded_length);
+        {
+          // Dictionary indices omit the four-byte length used by level streams.
+          const std::string encoded(payload.data() + pos, payload.size() - pos);
           std::vector<int32_t> indices;
           if (OB_FAIL(decode_hybrid(encoded, index_width, non_null_count, indices))) {
           } else {
@@ -1861,6 +1938,26 @@ int decode_data_page(const std::string &payload,
           }
         }
       }
+    } else if (encoding == 3 && physical_type == 0) {
+      int64_t non_null_count = num_values;
+      if (max_definition_level > 0) {
+        non_null_count = 0;
+        for (int32_t level : definition) non_null_count += level == max_definition_level;
+      }
+      std::vector<int32_t> boolean_values;
+      if (OB_FAIL(decode_levels(payload, pos, 1, non_null_count, true, boolean_values))) {
+      } else {
+        size_t value_index = 0;
+        for (int32_t i = 0; OB_SUCC(ret) && i < num_values; ++i) {
+          ParquetField field;
+          field.is_null_ = max_definition_level > 0 && definition[static_cast<size_t>(i)] < max_definition_level;
+          if (!field.is_null_) {
+            if (boolean_values[value_index] > 1 || boolean_values[value_index] < 0) ret = OB_INVALID_DATA;
+            else field.value_ = boolean_values[value_index++] ? "true" : "false";
+          }
+          values.push_back(std::move(field));
+        }
+      }
     } else if (encoding != 0) {
       ret = OB_NOT_SUPPORTED;
     } else if (physical_type == 0) {
@@ -1871,7 +1968,8 @@ int decode_data_page(const std::string &payload,
         field.is_null_ = is_null;
         if (!is_null) {
           if (value_bit / 8 >= payload.size() - pos) ret = OB_INVALID_DATA;
-          else field.value_.assign(1, static_cast<char>((static_cast<uint8_t>(payload[pos + value_bit / 8]) >> (value_bit % 8)) & 1));
+          else field.value_ = ((static_cast<uint8_t>(payload[pos + value_bit / 8]) >> (value_bit % 8)) & 1)
+                              ? "true" : "false";
           ++value_bit;
         }
         values.push_back(std::move(field));
@@ -1920,21 +2018,69 @@ int parse_page_header(std::istream &input,
   return ret;
 }
 
-int read_parquet_column(ParquetImpl &impl,
-                        const ParquetChunkInfo &chunk,
-                        const ParquetColumnInfo &column,
-                        const int64_t expected_rows,
-                        std::vector<ParquetField> &values)
+int format_parquet_temporal(const ParquetColumnInfo &column, std::string &value)
 {
   int ret = OB_SUCCESS;
-  values.clear();
-  std::vector<std::string> dictionary;
-  int64_t offset = chunk.start_offset_;
-  int64_t value_count = 0;
-  while (OB_SUCC(ret) && value_count < chunk.num_values_) {
+  if (column.inferred_type_ == InferredType::DATE || column.inferred_type_ == InferredType::DATETIME) {
+    char *end = nullptr;
+    errno = 0;
+    const int64_t raw = std::strtoll(value.c_str(), &end, 10);
+    if (errno == ERANGE || end != value.data() + value.size()) {
+      ret = OB_INVALID_DATA;
+    } else {
+      const bool timestamp = column.inferred_type_ == InferredType::DATETIME;
+      const int64_t units = column.converted_type_ == 9 ? 1000
+        : column.converted_type_ == 100 ? 1000000000 : 1000000;
+      const int64_t seconds = timestamp ? raw / units - (raw % units < 0) : 0;
+      const int64_t days = timestamp ? seconds / 86400 - (seconds % 86400 < 0) : raw;
+      // Civil date from a signed Unix day number, including dates before 1970.
+      if (days < -719162 || days > 2932896) {
+        ret = OB_INVALID_DATA;
+      } else {
+        const int64_t z = days + 719468;
+        const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+        const unsigned doe = static_cast<unsigned>(z - era * 146097);
+        const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        int year = static_cast<int>(yoe + era * 400);
+        const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        const unsigned mp = (5 * doy + 2) / 153;
+        const unsigned day = doy - (153 * mp + 2) / 5 + 1;
+        const unsigned month = mp < 10 ? mp + 3 : mp - 9;
+        year += month <= 2;
+        std::ostringstream formatted;
+        formatted << std::setfill('0') << std::setw(4) << year << '-'
+                  << std::setw(2) << month << '-' << std::setw(2) << day;
+        if (timestamp) {
+          const int64_t time = seconds - days * 86400;
+          const int64_t fraction = ((raw % units + units) % units) * (1000000000 / units) / 1000;
+          formatted << ' ' << std::setw(2) << time / 3600 << ':' << std::setw(2) << time / 60 % 60
+                    << ':' << std::setw(2) << time % 60 << '.' << std::setw(6) << fraction;
+        }
+        value = formatted.str();
+      }
+    }
+  }
+  return ret;
+}
+
+int read_parquet_page(ParquetImpl &impl,
+                        const ParquetChunkInfo &chunk,
+                        const ParquetColumnInfo &column,
+                        ParquetColumnCursor &cursor)
+{
+  int ret = OB_SUCCESS;
+  std::vector<ParquetField>().swap(cursor.values_);
+  cursor.row_index_ = 0;
+  std::vector<ParquetField> &values = cursor.values_;
+  std::vector<std::string> &dictionary = cursor.dictionary_;
+  int64_t &offset = cursor.offset_;
+  int64_t &value_count = cursor.values_read_;
+  const int64_t chunk_end = chunk.start_offset_ + chunk.compressed_size_;
+  // Keep one decoded page per projected column, independent of Row Group size.
+  while (OB_SUCC(ret) && values.empty() && value_count < chunk.num_values_) {
     impl.input_.clear();
     impl.input_.seekg(offset);
-    if (!impl.input_) {
+    if (!impl.input_ || offset >= chunk_end) {
       ret = OB_IO_ERROR;
     } else {
       int32_t page_type = 0;
@@ -1946,8 +2092,11 @@ int read_parquet_column(ParquetImpl &impl,
       CompactValue dictionary_header;
       if (OB_FAIL(parse_page_header(impl.input_, page_type, compressed_size, uncompressed_size,
                                     data_header, data_header_v2, dictionary_header, header_bytes))) {
-      } else if (compressed_size > 1024 * 1024 * 1024 || uncompressed_size > 1024 * 1024 * 1024) {
+      } else if (compressed_size > MAX_PARQUET_PAGE_BYTES || uncompressed_size > MAX_PARQUET_PAGE_BYTES) {
         ret = OB_SIZE_OVERFLOW;
+      } else if (header_bytes > chunk_end - offset
+                 || compressed_size > chunk_end - offset - header_bytes) {
+        ret = OB_INVALID_DATA;
       } else {
         std::string compressed(static_cast<size_t>(compressed_size), '\0');
         impl.input_.read(compressed.data(), compressed.size());
@@ -1957,7 +2106,9 @@ int read_parquet_column(ParquetImpl &impl,
           std::string payload;
           // Parquet DataPageV2 keeps repetition/definition levels uncompressed;
           // only the values suffix is compressed with the page codec.
-          if (page_type == 3 && chunk.codec_ == 1) {
+          const CompactValue *v2_compressed = compact_field(data_header_v2, 7);
+          if (page_type == 3 && chunk.codec_ == 1
+              && (v2_compressed == nullptr || v2_compressed->boolean_)) {
             const int32_t definition_bytes = static_cast<int32_t>(compact_int(data_header_v2, 5, -1));
             const int32_t repetition_bytes = static_cast<int32_t>(compact_int(data_header_v2, 6, -1));
             const int64_t levels_bytes = static_cast<int64_t>(definition_bytes) + repetition_bytes;
@@ -1974,7 +2125,7 @@ int read_parquet_column(ParquetImpl &impl,
                 payload.append(values);
               }
             }
-          } else if (chunk.codec_ == 1) {
+          } else if (chunk.codec_ == 1 && page_type != 3) {
             ret = snappy_uncompress(compressed, payload);
           } else {
             payload = std::move(compressed);
@@ -1983,7 +2134,8 @@ int read_parquet_column(ParquetImpl &impl,
           if (OB_SUCC(ret) && page_type == 2) {
             const int32_t dictionary_values = static_cast<int32_t>(compact_int(dictionary_header, 1, -1));
             size_t value_pos = 0;
-            if (dictionary_values < 0) ret = OB_INVALID_DATA;
+            if (dictionary_values < 0 || dictionary_values > MAX_PARQUET_PAGE_VALUES) ret = OB_SIZE_OVERFLOW;
+            else if (!dictionary.empty() || compact_int(dictionary_header, 2, -1) != 0) ret = OB_INVALID_DATA;
             else {
               for (int32_t i = 0; OB_SUCC(ret) && i < dictionary_values; ++i) {
                 std::string value;
@@ -1997,7 +2149,8 @@ int read_parquet_column(ParquetImpl &impl,
             const int32_t page_values = static_cast<int32_t>(compact_int(data_header, 1, -1));
             const int32_t encoding = static_cast<int32_t>(compact_int(data_header, 2, -1));
             const int32_t level_encoding = static_cast<int32_t>(compact_int(data_header, 3, -1));
-            if (page_values <= 0 || encoding < 0 || level_encoding < 0) ret = OB_INVALID_DATA;
+            if (page_values <= 0 || page_values > chunk.num_values_ - value_count
+                || encoding < 0 || level_encoding != 3) ret = OB_INVALID_DATA;
             else if (OB_FAIL(decode_data_page(payload, column.physical_type_, column.type_length_,
                                               column.max_repetition_level_, column.max_definition_level_,
                                               page_values, encoding,
@@ -2011,43 +2164,23 @@ int read_parquet_column(ParquetImpl &impl,
             const int32_t encoding = static_cast<int32_t>(compact_int(data_header_v2, 4, -1));
             const int32_t definition_bytes = static_cast<int32_t>(compact_int(data_header_v2, 5, -1));
             const int32_t repetition_bytes = static_cast<int32_t>(compact_int(data_header_v2, 6, -1));
-            const int32_t rep_width = column.max_repetition_level_ == 0 ? 0
-              : static_cast<int32_t>(std::ceil(std::log2(static_cast<double>(column.max_repetition_level_ + 1))));
-            const int32_t def_width = column.max_definition_level_ == 0 ? 0
-              : static_cast<int32_t>(std::ceil(std::log2(static_cast<double>(column.max_definition_level_ + 1))));
-            if (page_values <= 0 || null_count < 0 || definition_bytes < 0 || repetition_bytes < 0
+            if (page_values <= 0 || page_values > chunk.num_values_ - value_count
+                || null_count < 0 || null_count > page_values || definition_bytes < 0 || repetition_bytes != 0
                 || static_cast<size_t>(definition_bytes) + repetition_bytes > payload.size()) {
               ret = OB_INVALID_DATA;
             } else {
-              std::vector<int32_t> repetition;
-              std::vector<int32_t> definition;
-              const std::string rep_data(payload.data(), static_cast<size_t>(repetition_bytes));
-              if (OB_FAIL(decode_hybrid(rep_data, rep_width, page_values, repetition))) {
-              } else {
-                const std::string def_data(payload.data() + repetition_bytes, static_cast<size_t>(definition_bytes));
-                size_t def_pos = 0;
-                if (OB_FAIL(decode_hybrid(def_data, def_width, page_values, definition))) {
-                } else {
-                  const std::string values_data(payload.data() + repetition_bytes + definition_bytes,
-                                                payload.size() - repetition_bytes - definition_bytes);
-                  if (encoding != 0) {
-                    ret = OB_NOT_SUPPORTED;
-                  } else {
-                    size_t value_pos = 0;
-                    for (int32_t i = 0; OB_SUCC(ret) && i < page_values; ++i) {
-                      const bool is_null = column.max_definition_level_ > 0
-                        && definition[static_cast<size_t>(i)] < column.max_definition_level_;
-                      ParquetField field;
-                      field.is_null_ = is_null;
-                      if (!is_null && OB_FAIL(decode_plain_value(values_data, value_pos,
-                                                                  column.physical_type_, column.type_length_, field.value_))) {
-                      }
-                      values.push_back(std::move(field));
-                    }
-                    value_count += page_values;
-                  }
-                }
+              // Normalize the V2 level section to the V1 layout, then share the
+              // plain/dictionary/boolean decoder (V2 lengths exclude prefixes).
+              std::string normalized;
+              if (column.max_definition_level_ > 0) {
+                for (int i = 0; i < 4; ++i) normalized.push_back(static_cast<char>((definition_bytes >> (8 * i)) & 0xff));
+                normalized.append(payload.data(), static_cast<size_t>(definition_bytes));
               }
+              normalized.append(payload.data() + definition_bytes, payload.size() - definition_bytes);
+              if (OB_FAIL(decode_data_page(normalized, column.physical_type_, column.type_length_,
+                                            0, column.max_definition_level_, page_values, encoding,
+                                            dictionary, values))) {
+              } else value_count += page_values;
             }
           } else {
             if (OB_SUCC(ret)) {
@@ -2059,9 +2192,16 @@ int read_parquet_column(ParquetImpl &impl,
       offset += header_bytes + compressed_size;
     }
   }
-  if (OB_SUCC(ret) && (value_count != chunk.num_values_ || values.size() < static_cast<size_t>(expected_rows))) {
+  if (OB_SUCC(ret) && (value_count > chunk.num_values_ || values.empty())) {
     ret = OB_INVALID_DATA;
   }
+  for (size_t i = 0; OB_SUCC(ret) && i < values.size(); ++i) {
+    if (!values[i].is_null_) ret = format_parquet_temporal(column, values[i].value_);
+  }
+  cursor.buffered_bytes_ = values.capacity() * sizeof(ParquetField)
+                           + dictionary.capacity() * sizeof(std::string);
+  for (const ParquetField &field : values) cursor.buffered_bytes_ += field.value_.capacity();
+  for (const std::string &value : dictionary) cursor.buffered_bytes_ += value.capacity();
   if (OB_SUCC(ret)) {
     FileIdentity current;
     if (OB_FAIL(get_file_identity(impl.path_, current))) {
@@ -2077,21 +2217,20 @@ int read_parquet_column(ParquetImpl &impl,
 int load_parquet_row_group(ParquetImpl &impl, const ParquetRowGroupInfo &group)
 {
   int ret = OB_SUCCESS;
-  impl.column_values_.clear();
+  impl.cursors_.clear();
   if (group.row_count_ < 0 || group.row_count_ > 1000000000LL
       || group.chunks_.size() != impl.metadata_.columns_.size()) {
     ret = OB_INVALID_DATA;
   } else {
-    impl.column_values_.resize(impl.selected_columns_.size());
+    impl.cursors_.resize(impl.selected_columns_.size());
     for (size_t i = 0; OB_SUCC(ret) && i < impl.selected_columns_.size(); ++i) {
       const size_t source_index = impl.selected_columns_[i];
       if (source_index >= group.chunks_.size()) {
         ret = OB_ERR_UNEXPECTED;
-      } else if (OB_FAIL(read_parquet_column(impl, group.chunks_[source_index],
-                                             impl.metadata_.columns_[source_index],
-                                             group.row_count_, impl.column_values_[i]))) {
-      } else if (impl.column_values_[i].size() != static_cast<size_t>(group.row_count_)) {
+      } else if (group.chunks_[source_index].num_values_ != group.row_count_) {
         ret = OB_INVALID_DATA;
+      } else {
+        impl.cursors_[i].offset_ = group.chunks_[source_index].start_offset_;
       }
     }
   }
@@ -2172,17 +2311,33 @@ int ParquetReader::next(ParquetRecord &record, bool &has_record)
         }
       }
       if (OB_SUCC(ret) && impl->row_index_ < static_cast<size_t>(group.row_count_)) {
-        record.fields_.resize(impl->column_values_.size());
-        for (size_t i = 0; i < impl->column_values_.size(); ++i) {
-          record.fields_[i] = impl->column_values_[i][impl->row_index_];
+        FileIdentity current;
+        if (OB_FAIL(get_file_identity(impl->path_, current))) {
+        } else if (current.device_ != impl->identity_.device_ || current.inode_ != impl->identity_.inode_
+                   || current.size_ != impl->identity_.size_ || current.modified_sec_ != impl->identity_.modified_sec_
+                   || current.modified_nsec_ != impl->identity_.modified_nsec_) {
+          ret = OB_ERR_UNEXPECTED;
+        }
+        record.fields_.resize(impl->cursors_.size());
+        int64_t buffered_bytes = 0;
+        for (size_t i = 0; OB_SUCC(ret) && i < impl->cursors_.size(); ++i) {
+          ParquetColumnCursor &cursor = impl->cursors_[i];
+          const size_t source_index = impl->selected_columns_[i];
+          if (cursor.row_index_ == cursor.values_.size()) {
+            ret = read_parquet_page(*impl, group.chunks_[source_index],
+                                     impl->metadata_.columns_[source_index], cursor);
+          }
+          buffered_bytes += cursor.buffered_bytes_;
+          if (OB_SUCC(ret) && buffered_bytes > MAX_PARQUET_BUFFER_BYTES) ret = OB_SIZE_OVERFLOW;
+          if (OB_SUCC(ret)) record.fields_[i] = cursor.values_[cursor.row_index_++];
         }
         record.row_number_ = impl->row_index_;
         ++impl->row_index_;
-        has_record = true;
+        has_record = OB_SUCC(ret);
         break;
       } else if (OB_SUCC(ret)) {
         ++impl->row_group_index_;
-        impl->column_values_.clear();
+        impl->cursors_.clear();
         impl->row_index_ = 0;
         impl->row_group_loaded_ = false;
       }

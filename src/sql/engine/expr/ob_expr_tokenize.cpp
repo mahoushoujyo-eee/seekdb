@@ -80,6 +80,7 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
                 && tokenize_ctx->properties_ == param.properties_;
     }
     if (OB_SUCC(ret) && !is_same) {
+      tokenize_ctx->inited_ = false;
       tokenize_ctx->helper_.reset();
       tokenize_ctx->param_allocator_.reuse();
       if (OB_FAIL(ob_write_string(tokenize_ctx->param_allocator_,

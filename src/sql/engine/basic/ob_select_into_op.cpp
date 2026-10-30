@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
+#include "sql/engine/basic/ob_file_scan_utils.h"
 
 #include <cmath>
 #include <memory>
@@ -1253,6 +1254,9 @@ int ObSelectIntoOp::check_secure_file_path(ObString file_name)
                                                                 SYS_VAR_SECURE_FILE_PRIV,
                                                                 ctx_.get_allocator(),
                                                                 secure_file_priv))) {
+  } else if (MY_SPEC.is_copy_ && OB_FAIL(file_sql::check_secure_file_path(
+                   std::string(secure_file_priv.ptr(), secure_file_priv.length()), actual_path))) {
+    ret = OB_ERR_NO_PRIV_DIRECT_PATH_ACCESS;
   } else if (OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, actual_path))) {
     if (OB_ERR_NO_PRIVILEGE == ret) {
       ret = OB_ERR_NO_PRIV_DIRECT_PATH_ACCESS;

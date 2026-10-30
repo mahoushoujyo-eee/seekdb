@@ -5557,9 +5557,19 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
                                     ? const_param->get_param() : const_param->get_value();
             if (key.case_compare("header") == 0 && param->get_expr_type() == T_BOOL) {
               spec.file_csv_header_ = param_obj.get_bool();
+            } else if (key.case_compare("header") == 0 && param_obj.is_integer_type()) {
+              spec.file_csv_header_ = param_obj.get_int() != 0;
             } else if (key.case_compare("delimiter") == 0
                        && param_obj.is_string_type() && param_obj.get_string().length() == 1) {
               spec.file_csv_delimiter_ = param_obj.get_string().ptr()[0];
+            } else if (key.case_compare("quote") == 0
+                       && param_obj.is_string_type() && param_obj.get_string().length() == 1) {
+              spec.file_csv_quote_ = param_obj.get_string().ptr()[0];
+            } else if (key.case_compare("escape") == 0
+                       && param_obj.is_string_type() && param_obj.get_string().length() == 1) {
+              spec.file_csv_escape_ = param_obj.get_string().ptr()[0];
+            } else if (key.case_compare("nullstr") == 0 && param_obj.is_string_type()) {
+              OZ (ob_write_string(alloc, param_obj.get_string(), spec.file_csv_null_string_));
             }
           }
         }

@@ -1,0 +1,59 @@
+# owner: database-competition
+# description: Native joins, rescans, COPY failure and path restrictions.
+--source mysql_test/test_suite/file_sql/include/copy_file_sql_data.inc
+--disable_query_log
+let $FILE_SQL_DATA_DIR = $OBSERVER_DIR/data_for_mysqltest_file_sql;
+set session enable_file_sql = ON;
+
+--echo # Cross-format INNER and LEFT JOIN
+eval select c.id, c.name, j.note from read_csv('$FILE_SQL_DATA_DIR/basic.csv') c
+       inner join read_ndjson('$FILE_SQL_DATA_DIR/basic.jsonl') j on c.id = j.id
+      where c.active order by c.id;
+eval select c.id, p.c1 from read_parquet('$FILE_SQL_DATA_DIR/simple.parquet') p
+       left join read_csv('$FILE_SQL_DATA_DIR/basic.csv') c on c.id = p.c1
+      where p.c1 between 1 and 4 order by p.c1;
+
+--echo # Nested-loop rescan and grouped expressions
+eval select /*+ use_nl(c j) leading(c j) */ c.id, j.id as other_id
+       from read_csv('$FILE_SQL_DATA_DIR/basic.csv') c
+       join read_json('$FILE_SQL_DATA_DIR/basic.jsonl') j on c.id < j.id
+      order by c.id, j.id;
+eval select active, count(*) as n, min(id) as first_id, max(id) as last_id
+       from read_csv('$FILE_SQL_DATA_DIR/basic.csv') c
+      group by active having count(*) > 1 order by n desc limit 1;
+
+--echo # COPY table roundtrip and overwrite rejection
+--disable_warnings
+drop table if exists file_sql_export_source;
+--enable_warnings
+create table file_sql_export_source (id bigint, note varchar(64));
+insert into file_sql_export_source values (1, 'hello;world'), (2, 'say "hi"'), (3, NULL);
+eval copy file_sql_export_source to '$FILE_SQL_DATA_DIR/table_export.csv'
+     (header, delimiter ';', quote '"', escape '"', nullstr 'MISSING');
+eval select * from read_csv('$FILE_SQL_DATA_DIR/table_export.csv', delimiter => ';', nullstr = 'MISSING') order by id;
+eval select sum(note IS NULL) as null_rows from read_csv('$FILE_SQL_DATA_DIR/table_export.csv', delimiter => ';', nullstr = 'MISSING');
+--disable_result_log
+--error 1086
+eval copy file_sql_export_source to '$FILE_SQL_DATA_DIR/table_export.csv' (format csv, header);
+--enable_result_log
+eval select count(*) as preserved_rows from read_csv('$FILE_SQL_DATA_DIR/table_export.csv', delimiter = ';');
+drop table file_sql_export_source;
+
+--echo # Deny files and glob outside secure_file_priv
+--disable_result_log
+--error 1227
+select * from read_csv('/etc/passwd');
+--error 1227
+select * from glob('/etc/pass*');
+--error 1227
+select * from glob('/etc/no_such_file_sql_fixture_*');
+--exec ln -sf /etc/passwd $FILE_SQL_DATA_DIR/escape.csv
+--error 1227
+eval select * from read_csv('$FILE_SQL_DATA_DIR/escape.csv');
+--error 9731
+copy (select 1 as id) to '/tmp/file_sql_forbidden_export.csv' (format csv);
+--enable_result_log
+select 1 + 2 as ordinary_sql_still_works;
+set session enable_file_sql = OFF;
+--enable_query_log
+--source mysql_test/test_suite/file_sql/include/remove_file_sql_data.inc

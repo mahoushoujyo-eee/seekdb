@@ -36,7 +36,7 @@ namespace sql
 
 OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_,
                     is_file_table_, file_func_name_, file_path_, file_column_names_,
-                    file_csv_header_, file_csv_delimiter_);
+                    file_csv_header_, file_csv_delimiter_, file_csv_quote_, file_csv_escape_, file_csv_null_string_);
 
 namespace
 {
@@ -295,7 +295,8 @@ int ObFunctionTableOp::open_file_reader()
     } else if (OB_SUCCESS != (path_ret = session->get_secure_file_priv(secure_file_priv))) {
     } else {
       ObString full_path(static_cast<int32_t>(std::strlen(real_file)), real_file);
-      if (OB_SUCCESS != (path_ret = ObResolverUtils::check_secure_path(secure_file_priv, full_path))) {
+      if (OB_SUCCESS != (path_ret = file_sql::check_secure_file_path(
+            std::string(secure_file_priv.ptr(), secure_file_priv.length()), real_file))) {
         LOG_ERROR("file SQL runtime secure path rejected", K(path_ret));
       } else {
         resolved_path.assign(real_file, std::strlen(real_file));
@@ -305,9 +306,9 @@ int ObFunctionTableOp::open_file_reader()
   };
   if (func == "glob" || func == "GLOB") {
     std::vector<std::string> discovered_files;
-    if (OB_FAIL(file_sql::discover_files(path, discovered_files))) {
-    } else if (discovered_files.empty()) {
-      ret = OB_FILE_NOT_EXIST;
+    std::string resolved_root;
+    if (OB_FAIL(validate_path(file_sql::glob_search_root(path), resolved_root))) {
+    } else if (OB_FAIL(file_sql::discover_files(path, discovered_files))) {
     } else {
       for (const std::string &candidate : discovered_files) {
         std::string resolved_path;
@@ -320,12 +321,14 @@ int ObFunctionTableOp::open_file_reader()
           file_paths_.push_back(std::move(resolved_path));
         }
       }
-      if (OB_SUCC(ret) && file_paths_.empty()) ret = OB_FILE_NOT_EXIST;
     }
   } else if (func == "read_csv" || func == "READ_CSV") {
     file_sql::CsvOptions options;
     options.header_ = MY_SPEC.file_csv_header_;
     options.delimiter_ = MY_SPEC.file_csv_delimiter_;
+    options.quote_ = MY_SPEC.file_csv_quote_;
+    options.escape_ = MY_SPEC.file_csv_escape_;
+    options.null_string_.assign(MY_SPEC.file_csv_null_string_.ptr(), MY_SPEC.file_csv_null_string_.length());
     std::string resolved_path;
     if (OB_FAIL(validate_path(path, resolved_path))) {
     } else {

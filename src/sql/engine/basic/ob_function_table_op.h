@@ -37,6 +37,7 @@ public:
     : ObOpSpec(alloc, type), value_expr_(nullptr), column_exprs_(alloc), has_correlated_expr_(false),
       is_file_table_(false), file_func_name_(), file_path_()
       , file_column_names_(alloc), file_csv_header_(true), file_csv_delimiter_(',')
+      , file_csv_quote_('"'), file_csv_escape_('"'), file_csv_null_string_("NULL")
   {}
   ObExpr *value_expr_;
   common::ObFixedArray<ObExpr*, common::ObIAllocator> column_exprs_;
@@ -47,6 +48,9 @@ public:
   common::ObFixedArray<common::ObString, common::ObIAllocator> file_column_names_;
   bool file_csv_header_;
   char file_csv_delimiter_;
+  char file_csv_quote_;
+  char file_csv_escape_;
+  common::ObString file_csv_null_string_;
 };
 
 class ObFunctionTableOp : public ObOperator

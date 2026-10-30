@@ -3000,6 +3000,14 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(resolve_into_const_node(node->children_[0], into_item.outfile_name_))) {
   }
+  if (OB_SUCC(ret) && node->value_ == 1) {
+    bool enabled = false;
+    if (OB_FAIL(session_info_->get_sys_variable(SYS_VAR_ENABLE_FILE_SQL, enabled))) {
+    } else if (!enabled) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "file SQL is disabled; set enable_file_sql=1 first");
+    }
+  }
   if (OB_SUCC(ret) && NULL != (format_node = node->children_[1])) { // format
     for (int i = 0; OB_SUCC(ret) && i < format_node->num_child_; ++i) {
       if (OB_ISNULL(option_node = format_node->children_[i])) {
@@ -3014,6 +3022,10 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
       has_field_delimiter |= (T_FIELD_TERMINATED_STR == option_node->type_);
       has_field_quote |= (T_OPTIONALLY_CLOSED_STR == option_node->type_
                           || T_CLOSED_STR == option_node->type_);
+    }
+    if (OB_SUCC(ret) && node->value_ == 1 && !has_format_type) {
+      external_format.format_type_ = ObExternalFileFormat::CSV_FORMAT;
+      has_format_type = true;
     }
     if (OB_FAIL(ret)) {
     } else if (!has_format_type) {

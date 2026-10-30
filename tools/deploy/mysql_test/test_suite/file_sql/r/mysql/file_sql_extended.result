@@ -1,0 +1,28 @@
+# Cross-format INNER and LEFT JOIN
+id	name	note
+1	Alice	NULL
+3	Chen	ok
+id	c1
+1	1
+2	2
+3	3
+NULL	4
+# Nested-loop rescan and grouped expressions
+id	other_id
+1	2
+1	3
+2	3
+active	n	first_id	last_id
+1	2	1	3
+# COPY table roundtrip and overwrite rejection
+id	note
+1	hello;world
+2	say "hi"
+3	NULL
+null_rows
+1
+preserved_rows
+3
+# Deny files and glob outside secure_file_priv
+ordinary_sql_still_works
+3

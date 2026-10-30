@@ -4,7 +4,7 @@ package(default_testonly = True)
 
 seekdb_cc_library(
     name = "file_scan_utils_test_cases",
-    srcs = ["test_file_scan_utils.cpp"],
+    srcs = ["test_file_scan_utils.cpp", "file_sql_parquet_fixtures.h"],
     alwayslink = True,
     deps = [
         "@seekdb_3rd_headers//:gtest",

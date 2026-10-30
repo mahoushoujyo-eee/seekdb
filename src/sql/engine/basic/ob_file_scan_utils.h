@@ -47,6 +47,7 @@ struct CsvOptions
   char escape_;
   bool header_;
   bool empty_as_null_;
+  std::string null_string_;
   int64_t max_record_bytes_;
   int64_t max_field_bytes_;
   int64_t max_columns_;
@@ -190,6 +191,8 @@ int infer_parquet_schema(const std::string &path,
                          std::vector<CsvColumn> &columns);
 
 int discover_files(const std::string &pattern, std::vector<std::string> &files);
+std::string glob_search_root(const std::string &pattern);
+int check_secure_file_path(const std::string &directory, const std::string &canonical_path);
 const char *inferred_type_name(InferredType type);
 
 } // namespace file_sql

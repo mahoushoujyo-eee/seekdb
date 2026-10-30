@@ -407,7 +407,7 @@ END_P SET_VAR DELIMITER
 %type <node> replace_with_opt_hint insert_with_opt_hint column_list opt_on_duplicate_key_clause opt_into opt_replace opt_temporary no_param_column_ref
 %type <node> insert_vals_list insert_vals value_or_values opt_insert_row_alias
 %type <node> select_with_parens select_no_parens select_clause select_into no_table_select_with_order_and_limit simple_select_with_order_and_limit select_with_parens_with_order_and_limit select_clause_set_with_order_and_limit
-%type <node> copy_stmt copy_option_list copy_option
+%type <node> copy_stmt copy_source opt_copy_options copy_option_list copy_option
 %type <node> simple_select no_table_select limit_clause select_expr_list opt_approx
 %type <node> with_select with_clause with_list common_table_expr opt_column_alias_name_list alias_name_list column_alias_name
 %type <node> opt_where opt_hint_value opt_groupby opt_rollup opt_order_by order_by opt_having groupby_clause order_by_opt_null
@@ -677,15 +677,47 @@ stmt:
 /* COPY query TO path is represented as SELECT ... INTO OUTFILE so it uses
  * the normal seekdb query plan and CSV writer. */
 copy_stmt:
-COPY '(' select_no_parens ')' TO STRING_VALUE '(' copy_option_list ')'
+COPY copy_source TO STRING_VALUE opt_copy_options
 {
-  ParseNode *format_list = NULL;
-  merge_nodes(format_list, result, T_EXTERNAL_FILE_FORMAT, $8);
   ParseNode *into_node = NULL;
-  malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3, $6, format_list, NULL);
+  malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3, $4, $5, NULL);
   into_node->value_ = 1;
-  $3->children_[PARSE_SELECT_INTO_EXTRA] = into_node;
-  $$ = $3;
+  $2->children_[PARSE_SELECT_INTO_EXTRA] = into_node;
+  $$ = $2;
+}
+;
+
+copy_source:
+'(' select_no_parens ')'
+{
+  $$ = $2;
+}
+| relation_factor
+{
+  ParseNode *star = NULL;
+  ParseNode *projection = NULL;
+  ParseNode *project_list = NULL;
+  ParseNode *from_list = NULL;
+  malloc_terminal_node(star, result->malloc_pool_, T_STAR);
+  dup_string_to_node(star, result->malloc_pool_, "*");
+  malloc_non_terminal_node(projection, result->malloc_pool_, T_PROJECT_STRING, 1, star);
+  dup_string_to_node(projection, result->malloc_pool_, "*");
+  merge_nodes(project_list, result, T_PROJECT_LIST, projection);
+  merge_nodes(from_list, result, T_FROM_LIST, $1);
+  malloc_select_node($$, result->malloc_pool_);
+  $$->children_[PARSE_SELECT_SELECT] = project_list;
+  $$->children_[PARSE_SELECT_FROM] = from_list;
+}
+;
+
+opt_copy_options:
+/* EMPTY */
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT, 0);
+}
+| '(' copy_option_list ')'
+{
+  merge_nodes($$, result, T_EXTERNAL_FILE_FORMAT, $2);
 }
 ;
 
@@ -704,6 +736,10 @@ copy_option:
 FORMAT NAME_OB
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT_TYPE, 1, $2);
+}
+| ESCAPE text_string
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_ESCAPED_STR, 1, $2);
 }
 | NAME_OB
 {
@@ -17679,6 +17715,12 @@ simple_expr
   malloc_non_terminal_node($$, result->malloc_pool_, T_ASSIGN_ITEM, 2, $1, $3);
 }
 | FORMAT COMP_EQ simple_expr
+{
+  ParseNode *name_node = NULL;
+  get_non_reserved_node(name_node, result->malloc_pool_, @1.first_column, @1.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_ASSIGN_ITEM, 2, name_node, $3);
+}
+| ESCAPE COMP_EQ simple_expr
 {
   ParseNode *name_node = NULL;
   get_non_reserved_node(name_node, result->malloc_pool_, @1.first_column, @1.last_column);

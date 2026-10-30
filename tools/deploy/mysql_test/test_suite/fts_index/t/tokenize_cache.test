@@ -1,0 +1,29 @@
+# owner: database-competition
+# description: Parser reuse across rows must track parser names and properties.
+--disable_query_log
+--disable_warnings
+drop database if exists fts_cache_regression;
+--enable_warnings
+create database fts_cache_regression;
+use fts_cache_regression;
+create table texts (id int primary key, body varchar(128), parser varchar(32), properties varchar(256));
+insert into texts values
+ (1, 'hello world', 'space', '[{"output":"default"}]'),
+ (2, 'hello world', 'ngram', '[{"output":"default"}]'),
+ (3, '', 'space', '[{"output":"default"}]'),
+ (4, 'abc def', 'ngram', '[{"output":"default"}]'),
+ (5, 'hello world', 'space', '[{"output":"all"}]'),
+ (6, 'hello world', 'space', '[{"output":"default"}]');
+--echo # Dynamic parser cache agrees with isolated literal parser calls
+select id, json_contains(
+  tokenize(body, parser, properties),
+  case when parser = 'ngram' then tokenize(body, 'ngram')
+       when id = 5 then tokenize(body, 'space', '[{"output":"all"}]')
+       else tokenize(body, 'space') end) as correct
+  from texts order by id;
+--echo # Empty inputs and stopwords remain valid
+select json_length(tokenize('', 'beng')) as empty_tokens,
+       json_length(tokenize('the and or', 'beng')) as stopword_tokens;
+drop database fts_cache_regression;
+use test;
+--enable_query_log

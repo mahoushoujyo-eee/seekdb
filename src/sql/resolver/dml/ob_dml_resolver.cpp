@@ -4160,11 +4160,16 @@ int ObDMLResolver::resolve_file_table_function_item(const ParseNode &parse_tree,
                   ret = OB_ERR_PARSE_SQL;
                 }
               }
-            } else if (key.case_compare("delimiter") == 0) {
+            } else if (key.case_compare("delimiter") == 0 || key.case_compare("quote") == 0
+                       || key.case_compare("escape") == 0 || key.case_compare("nullstr") == 0) {
               const ParseNode *v = arg->children_[1];
               if (v->type_ == T_VARCHAR || v->type_ == T_CHAR || v->type_ == T_QUESTIONMARK) {
-                if (v->str_len_ != 1) ret = OB_INVALID_ARGUMENT;
-                else csv_options.delimiter_ = v->str_value_[0];
+                if (key.case_compare("nullstr") == 0) {
+                  csv_options.null_string_.assign(v->str_value_, v->str_len_);
+                } else if (v->str_len_ != 1) ret = OB_INVALID_ARGUMENT;
+                else if (key.case_compare("delimiter") == 0) csv_options.delimiter_ = v->str_value_[0];
+                else if (key.case_compare("quote") == 0) csv_options.quote_ = v->str_value_[0];
+                else csv_options.escape_ = v->str_value_[0];
               } else {
                 ret = OB_ERR_PARSE_SQL;
               }
@@ -4197,9 +4202,14 @@ int ObDMLResolver::resolve_file_table_function_item(const ParseNode &parse_tree,
     std::vector<std::string> files;
     const bool is_glob = func_name.case_compare("glob") == 0;
     if (is_glob) {
-      if (OB_FAIL(file_sql::discover_files(path, files))) {
-      } else if (files.empty()) {
-        ret = OB_FILE_NOT_EXIST;
+      const std::string search_root = file_sql::glob_search_root(path);
+      char root_buf[PATH_MAX] = {0};
+      ObString secure_root;
+      if (::realpath(search_root.c_str(), root_buf) == nullptr) ret = OB_FILE_NOT_EXIST;
+      else if (OB_FAIL(session_info_->get_secure_file_priv(secure_root))) {
+      } else if (OB_FAIL(file_sql::check_secure_file_path(
+                           std::string(secure_root.ptr(), secure_root.length()), root_buf))) {
+      } else if (OB_FAIL(file_sql::discover_files(path, files))) {
       } else {
         for (const std::string &file : files) {
           char real_buf[PATH_MAX] = {0};
@@ -4208,7 +4218,8 @@ int ObDMLResolver::resolve_file_table_function_item(const ParseNode &parse_tree,
           ObString secure_file_priv;
           if (OB_FAIL(session_info_->get_secure_file_priv(secure_file_priv))) break;
           ObString full_path(static_cast<int32_t>(strlen(real_file)), real_file);
-          if (OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, full_path))) break;
+          if (OB_FAIL(file_sql::check_secure_file_path(
+                        std::string(secure_file_priv.ptr(), secure_file_priv.length()), real_file))) break;
         }
         if (OB_SUCC(ret)) {
           file_sql::CsvColumn col;
@@ -4227,7 +4238,8 @@ int ObDMLResolver::resolve_file_table_function_item(const ParseNode &parse_tree,
         ObString secure_file_priv;
         ObString full_path(static_cast<int32_t>(strlen(real_file)), real_file);
         if (OB_FAIL(session_info_->get_secure_file_priv(secure_file_priv))) {
-        } else if (OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, full_path))) {
+        } else if (OB_FAIL(file_sql::check_secure_file_path(
+                             std::string(secure_file_priv.ptr(), secure_file_priv.length()), real_file))) {
         } else if (func_name.case_compare("read_csv") == 0) {
           if (OB_FAIL(file_sql::infer_csv_schema(path, csv_options, columns))) {
           }
