@@ -34,6 +34,7 @@
 #include "sql/engine/ob_batch_rows.h"
 #include "sql/engine/ob_physical_plan.h"
 #include "query/vector/ob_vector_index_util.h"
+#include "query/api/query/session/ob_session_access.h"
 #include "share/ob_dml_sql_splicer.h"
 #include "sql/ob_sql_utils.h"
 #include <strings.h>
@@ -133,7 +134,12 @@ int execute_ai_nested_sql(ObTableModifyOp &op, const ObSqlString &sql)
   int64_t affected_rows = 0;
   ObDASCtx &das_ctx = op.get_exec_ctx().get_das_ctx();
   const bool saved_ai_column_nested = das_ctx.is_ai_column_nested_;
+  ObSQLSessionInfo *session = op.get_exec_ctx().get_my_session();
+  const bool saved_inner = OB_NOT_NULL(session) && query::ObSessionAccess::is_inner(session);
   das_ctx.is_ai_column_nested_ = true;
+  if (OB_NOT_NULL(session) && !saved_inner) {
+    query::ObSessionAccess::set_inner_session(session);
+  }
   if (OB_FAIL(op.begin_nested_session(false))) {
     LOG_INFO("failed to begin nested session for AI column", K(ret));
   } else {
@@ -146,6 +152,9 @@ int execute_ai_nested_sql(ObTableModifyOp &op, const ObSqlString &sql)
       ret = end_ret;
       LOG_INFO("failed to end nested session for AI column", K(ret));
     }
+  }
+  if (OB_NOT_NULL(session) && !saved_inner) {
+    query::ObSessionAccess::set_user_session(session);
   }
   das_ctx.is_ai_column_nested_ = saved_ai_column_nested;
   return ret;
@@ -226,6 +235,39 @@ int enqueue_ai_column_tasks(ObTableModifyOp &op,
   } else if (OB_FAIL(schema_guard->get_table_schema(table_id, table_schema))) {
   } else if (OB_ISNULL(table_schema)) {
     ret = OB_SCHEMA_ERROR;
+  }
+  if (OB_SUCC(ret)) {
+    bool has_ai_columns = false;
+    for (auto iter = table_schema->column_begin(); !has_ai_columns && iter != table_schema->column_end(); ++iter) {
+      has_ai_columns = OB_NOT_NULL(*iter) && (*iter)->is_ai_column();
+    }
+    if (!has_ai_columns) {
+      return OB_SUCCESS;
+    }
+  }
+  // The worker writes an AI result and its hidden bookkeeping columns through
+  // an inner UPDATE. That write must not invalidate the result and enqueue a
+  // second task. User assignments are rejected during resolution; RETRY has
+  // its own marker and must continue through the normal refresh path.
+  if (OB_SUCC(ret) && modify_row.dml_event_ != ObDmlEventType::DE_INSERTING
+      && modify_row.dml_event_ != ObDmlEventType::DE_DELETING) {
+    const ObUpdCtDef *upd_ctdef = dynamic_cast<const ObUpdCtDef *>(&ctdef);
+    bool writes_ai_result = false;
+    if (OB_NOT_NULL(upd_ctdef) && upd_ctdef->ai_retry_column_id_ == OB_INVALID_ID) {
+      for (int64_t i = 0; !writes_ai_result && i < upd_ctdef->assign_columns_.count(); ++i) {
+        const ColumnContent &assignment = upd_ctdef->assign_columns_.at(i);
+        if (assignment.projector_index_ < ctdef.column_ids_.count()) {
+          const ObColumnSchemaV2 *assigned = table_schema->get_column_schema(
+              ctdef.column_ids_.at(assignment.projector_index_));
+          writes_ai_result = OB_NOT_NULL(assigned) && assigned->is_ai_column();
+        }
+      }
+    }
+    if (writes_ai_result) {
+      return OB_SUCCESS;
+    }
+  }
+  if (OB_FAIL(ret)) {
   } else if (OB_FAIL(schema_guard->get_database_schema(table_schema->get_database_id(), database_schema))) {
   } else if (OB_ISNULL(database_schema)) {
     ret = OB_SCHEMA_ERROR;
@@ -269,10 +311,15 @@ int enqueue_ai_column_tasks(ObTableModifyOp &op,
         continue;
       }
       bool should_refresh = is_insert || rowkey_changed;
+      const ObUpdCtDef *retry_ctdef = dynamic_cast<const ObUpdCtDef *>(&ctdef);
+      if (!should_refresh && OB_NOT_NULL(retry_ctdef)
+          && retry_ctdef->ai_retry_column_id_ == ai_column->get_column_id()) {
+        should_refresh = true;
+      }
       if (!should_refresh && !is_delete) {
         const ObUpdCtDef *upd_ctdef = dynamic_cast<const ObUpdCtDef *>(&ctdef);
         if (OB_NOT_NULL(upd_ctdef)) {
-          const ObIArray<ObString> &type_info = ai_column->get_extended_type_info();
+          const ObIArray<ObString> &type_info = ai_column->get_ai_column_info();
           const ObString prompt = type_info.empty() ? ObString() : type_info.at(0);
           for (int64_t i = 0; OB_SUCC(ret) && !should_refresh && i < upd_ctdef->assign_columns_.count(); ++i) {
             const ColumnContent &assignment = upd_ctdef->assign_columns_.at(i);
@@ -302,7 +349,16 @@ int enqueue_ai_column_tasks(ObTableModifyOp &op,
       if (OB_FAIL(cleanup.append_fmt("delete from oceanbase.__all_ai_column_task where table_id = %lu and rowkey_predicate = ",
                                      static_cast<unsigned long>(ObSchemaUtils::get_extract_schema_id(table_id))))) {
       } else if (OB_FAIL(append_sql_quoted(cleanup, old_predicate.string()))) {
-      } else if (OB_FAIL(execute_ai_nested_sql(op, cleanup))) {
+      } else {
+        if (!rowkey_changed && OB_FAIL(cleanup.append(" and column_id in ("))) {
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && !rowkey_changed && i < ai_columns.count(); ++i) {
+          ret = cleanup.append_fmt("%s%lu", i == 0 ? "" : ",",
+                                   static_cast<unsigned long>(ai_columns.at(i)->get_column_id()));
+        }
+        if (OB_SUCC(ret) && !rowkey_changed && OB_FAIL(cleanup.append(")"))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(execute_ai_nested_sql(op, cleanup))) {
+        }
       }
     }
     if (OB_SUCC(ret) && ai_columns.count() > 0) {

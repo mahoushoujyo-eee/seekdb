@@ -24,6 +24,79 @@ using namespace share;
 using namespace share::schema;
 namespace sql
 {
+namespace
+{
+// Rewrite only unquoted, unqualified STATUS references in the retry predicate.
+// This is a parse-tree transformation; strings and quoted business identifiers
+// retain their normal SQL meaning.
+int resolve_ai_retry_status(ObIAllocator &allocator, ParseNode *node,
+                           uint64_t column_id, const ObString &table_name, int depth = 0)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(node) || node->type_ == T_SELECT) {
+  } else if (depth > 256) {
+    ret = OB_SIZE_OVERFLOW;
+  } else if (node->type_ == T_COLUMN_REF && node->num_child_ == 3
+             && node->children_[0] == NULL && node->children_[1] == NULL
+             && node->children_[2] != NULL && !node->children_[2]->is_input_quoted_
+             && ObString(node->children_[2]->str_len_,
+                         node->children_[2]->str_value_).case_compare("status") == 0) {
+    ParseNode *case_node = new_node(&allocator, T_CASE, 3);
+    ParseNode *state_ref = new_node(&allocator, T_COLUMN_REF, 3);
+    ParseNode *state_table = new_node(&allocator, T_IDENT, 0);
+    ParseNode *state_name = new_node(&allocator, T_IDENT, 0);
+    ParseNode *whens = new_node(&allocator, T_WHEN_LIST, 3);
+    ParseNode *fallback = new_node(&allocator, T_VARCHAR, 0);
+    char *name = static_cast<char *>(allocator.alloc(64));
+    char *table_buf = static_cast<char *>(allocator.alloc(table_name.length()));
+    if (OB_ISNULL(case_node) || OB_ISNULL(state_ref) || OB_ISNULL(state_table)
+        || OB_ISNULL(state_name)
+        || OB_ISNULL(whens) || OB_ISNULL(fallback) || OB_ISNULL(name)
+        || OB_ISNULL(table_buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      MEMCPY(table_buf, table_name.ptr(), table_name.length());
+      state_table->str_len_ = table_name.length();
+      state_table->str_value_ = table_buf;
+      state_name->str_len_ = snprintf(name, 64, "__ai_%lu_state",
+                                      static_cast<unsigned long>(column_id));
+      state_name->str_value_ = name;
+      state_ref->children_[1] = state_table;
+      state_ref->children_[2] = state_name;
+      const char *statuses[] = {"PENDING", "READY", "FAILED"};
+      for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
+        ParseNode *when = new_node(&allocator, T_WHEN, 2);
+        ParseNode *value = new_node(&allocator, T_INT, 0);
+        ParseNode *status = new_node(&allocator, T_VARCHAR, 0);
+        if (OB_ISNULL(when) || OB_ISNULL(value) || OB_ISNULL(status)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          value->value_ = i + 1;
+          status->str_value_ = statuses[i];
+          status->str_len_ = strlen(statuses[i]);
+          when->children_[0] = value;
+          when->children_[1] = status;
+          whens->children_[i] = when;
+        }
+      }
+      if (OB_SUCC(ret)) {
+        fallback->str_value_ = "PENDING";
+        fallback->str_len_ = 7;
+        case_node->children_[0] = state_ref;
+        case_node->children_[1] = whens;
+        case_node->children_[2] = fallback;
+        *node = *case_node;
+      }
+    }
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
+      ret = resolve_ai_retry_status(allocator, node->children_[i], column_id, table_name, depth + 1);
+    }
+  }
+  return ret;
+}
+} // namespace
+
 ObUpdateResolver::ObUpdateResolver(ObResolverParams &param)
   : ObDelUpdResolver(param)
 {
@@ -39,6 +112,13 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
   int ret = OB_SUCCESS;
   ObUpdateStmt *update_stmt = NULL;
   ObSEArray<ObTableAssignment, 2> tables_assign;
+  if (parse_tree.num_child_ > 10
+      && parse_tree.children_[10] != NULL
+      && parse_tree.children_[10]->type_ == T_AI_COLUMN_RETRY
+      && parse_tree.children_[10]->value_ > 1) {
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
+    return OB_NOT_SUPPORTED;
+  }
   if (T_UPDATE != parse_tree.type_
       || 3 > parse_tree.num_child_
       || OB_ISNULL(parse_tree.children_)
@@ -74,6 +154,35 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
   if (OB_SUCC(ret)) {
     ParseNode *table_node = parse_tree.children_[TABLE];
     if (OB_FAIL(resolve_table_list(*table_node))) {
+    }
+  }
+
+  // ALTER TABLE ... RETRY AI COLUMN is lowered by the parser to an UPDATE
+  // carrying a marker. Resolve the target column against the real table before
+  // normal assignment validation and let DML enqueue the retry task.
+  if (OB_SUCC(ret) && parse_tree.num_child_ > 10
+      && parse_tree.children_[10] != NULL
+      && parse_tree.children_[10]->type_ == T_AI_COLUMN_RETRY) {
+    const ParseNode *retry = parse_tree.children_[10];
+    const ParseNode *name = retry->children_[0];
+    const TableItem *table_item = update_stmt->get_table_item(0);
+    const ObTableSchema *table_schema = NULL;
+    if (OB_ISNULL(name) || OB_ISNULL(table_item)
+        || OB_ISNULL(schema_checker_)
+        || OB_FAIL(schema_checker_->get_table_schema(table_item->ref_id_, table_schema))) {
+    } else if (OB_ISNULL(table_schema)) {
+      ret = OB_SCHEMA_ERROR;
+    } else {
+      const ObColumnSchemaV2 *column = table_schema->get_column_schema(
+          ObString(name->str_len_, name->str_value_));
+      if (OB_ISNULL(column) || !column->is_ai_column()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
+      } else {
+        update_stmt->set_ai_retry_column_id(column->get_column_id());
+        ret = resolve_ai_retry_status(*allocator_, parse_tree.children_[WHERE],
+                                      column->get_column_id(), table_item->table_name_);
+      }
     }
   }
 

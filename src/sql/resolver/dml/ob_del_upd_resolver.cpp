@@ -24,6 +24,7 @@
 #include "sql/parser/parse_malloc.h"
 #include "query/vector/ob_vector_index_util.h"
 #include "sql/das/ob_domain_id.h"
+#include "sql/ob_sql_utils.h"
 
 namespace oceanbase
 {
@@ -121,6 +122,21 @@ int ObDelUpdResolver::resolve_assignments(const ParseNode &parse_node,
       }
       if (OB_SUCC(ret) && T_INSERT_SCOPE == scope) {
         if (OB_FAIL(mock_values_column_ref(ref_expr))) {
+        }
+      }
+      if (OB_SUCC(ret) && table->is_basic_table()
+          && session_info_->is_user_session()
+          && !ObSQLUtils::is_nested_sql(session_info_->get_cur_exec_ctx())) {
+        const ObTableSchema *table_schema = NULL;
+        const ObColumnSchemaV2 *target = NULL;
+        const ObUpdateStmt *update = stmt->is_update_stmt() ? static_cast<ObUpdateStmt *>(stmt) : NULL;
+        if (OB_FAIL(schema_checker_->get_table_schema(table->ref_id_, table_schema))) {
+        } else if (OB_NOT_NULL(table_schema)
+                   && OB_NOT_NULL(target = table_schema->get_column_schema(ref_expr->get_column_id()))
+                   && target->is_ai_column()
+                   && (OB_ISNULL(update) || update->get_ai_retry_column_id() == OB_INVALID_ID)) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "direct assignment to AI columns");
         }
       }
       // process expression

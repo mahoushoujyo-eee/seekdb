@@ -214,6 +214,8 @@ int assign(const ObColumnSchemaV2 &src_schema);
   inline const common::ObString &get_comment_str() const { return comment_; }
   inline const common::ObIArray<common::ObString> &get_extended_type_info() const { return extended_type_info_; }
   inline common::ObIArray<common::ObString> &get_extended_type_info() { return extended_type_info_; }
+  inline const common::ObIArray<common::ObString> &get_ai_column_info() const { return ai_column_info_; }
+  int add_ai_column_info(const common::ObString &info);
   inline uint64_t get_prev_column_id() const { return prev_column_id_; }
   inline uint64_t get_next_column_id() const { return next_column_id_; }
   inline int64_t get_encoding_type() const { return encoding_type_; }
@@ -382,6 +384,8 @@ private:
   common::ObString column_name_;
   common::ObString comment_;
   common::ObArrayHelper<common::ObString> extended_type_info_;//used for enum and set
+  // Expression and options must not be exposed as VECTOR/enum type metadata.
+  common::ObArrayHelper<common::ObString> ai_column_info_;
   uint64_t prev_column_id_;
   uint64_t next_column_id_;
   int64_t encoding_type_; // for test, no need serialization

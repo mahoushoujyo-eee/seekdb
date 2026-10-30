@@ -29,6 +29,7 @@
 #include "sql/resolver/cmd/ob_call_procedure_stmt.h"
 #include "sql/resolver/cmd/ob_anonymous_block_stmt.h"
 #include "sql/resolver/ddl/ob_explain_stmt.h"
+#include "sql/resolver/dml/ob_update_stmt.h"
 #include "sql/privilege_check/ob_privilege_check.h"
 #include "sql/rewrite/ob_transformer_impl.h"
 #include "sql/rewrite/ob_transform_pre_process.h"
@@ -39,7 +40,9 @@
 #include "sql/monitor/show_trace/ob_show_trace.h"
 #include "sql/optimizer/ob_optimizer.h"
 #include "share/rc/ob_server_runtime.h"
+#include "share/ob_errno.h"
 #include "query/session/ob_inner_sql_connection_access.h"
+#include "query/api/query/session/ob_session_access.h"
 #include "common/mysqlclient/ob_mysql_proxy.h"
 
 namespace oceanbase
@@ -88,6 +91,13 @@ int check_ai_column_strict_stmt(ObDMLStmt &stmt,
   int64_t strict_read = 0;
   ObSEArray<ObDMLStmt *, 8> pending;
   ObSEArray<uint64_t, 16> checked;
+  ObSEArray<uint64_t, 16> checked_tables;
+  ObExecContext *exec_ctx = session.get_cur_exec_ctx();
+  if (!session.is_user_session()
+      || (exec_ctx != nullptr && exec_ctx->get_parent_ctx() != nullptr
+          && exec_ctx->get_parent_ctx()->get_das_ctx().is_ai_column_nested_)) {
+    return OB_SUCCESS;
+  }
   if (OB_FAIL(session.get_sys_variable(share::SYS_VAR_AI_COLUMN_STRICT_READ, strict_read))) {
   } else if (strict_read == 0) {
   } else if (OB_FAIL(pending.push_back(&stmt))) {
@@ -112,25 +122,30 @@ int check_ai_column_strict_stmt(ObDMLStmt &stmt,
           } else {
             const ObTableSchema *table_schema = nullptr;
             const ObColumnSchemaV2 *column_schema = nullptr;
-            const uint64_t table_id = expr->get_table_id();
+            const TableItem *table_item = current->get_table_item_by_id(item->table_id_);
+            if (OB_ISNULL(table_item) || !table_item->is_basic_table()) {
+              continue;
+            }
+            const uint64_t table_id = table_item->ref_id_;
             const uint64_t column_id = expr->get_column_id();
+            bool already_checked = false;
+            for (int64_t j = 0; !already_checked && j < checked.count(); ++j) {
+              already_checked = checked.at(j) == column_id && checked_tables.at(j) == table_id;
+            }
+            if (current->is_update_stmt()
+                && static_cast<ObUpdateStmt *>(current)->get_ai_retry_column_id() == column_id) {
+              continue;
+            }
             if (OB_FAIL(schema_guard.get_table_schema(table_id, table_schema))) {
             } else if (OB_ISNULL(table_schema)
                        || OB_ISNULL(column_schema = table_schema->get_column_schema(column_id))
                        || !column_schema->is_ai_column()
-                       || has_exist_in_array(checked, column_id)) {
+                       || already_checked) {
             } else if (OB_FAIL(checked.push_back(column_id))) {
+            } else if (OB_FAIL(checked_tables.push_back(table_id))) {
             } else {
-              TableItem *table_item = current->get_table_item_by_id(item->table_id_);
-              if (OB_ISNULL(table_item)) {
-                table_item = current->get_table_item_by_id(table_id);
-              }
-              if (OB_ISNULL(table_item) || table_item->is_generated_table()
-                  || table_item->is_function_table()) {
-                continue;
-              }
               ObSqlString sql;
-              if (OB_FAIL(sql.append("select count(*) from "))) {
+              if (OB_FAIL(sql.append("select /*+ opt_param('hidden_column_visible', 'true') */ count(*) from "))) {
               } else if (OB_FAIL(append_ai_strict_identifier(sql, table_item->database_name_))) {
               } else if (OB_FAIL(sql.append("."))) {
               } else if (OB_FAIL(append_ai_strict_identifier(sql, table_item->table_name_))) {
@@ -145,6 +160,10 @@ int check_ai_column_strict_stmt(ObDMLStmt &stmt,
                 ObISQLClient::ReadResult result;
                 sqlclient::ObMySQLResult *mysql_result = nullptr;
                 int64_t unfinished = 0;
+                const bool saved_inner = query::ObSessionAccess::is_inner(&session);
+                if (!saved_inner) {
+                  query::ObSessionAccess::set_inner_session(&session);
+                }
                 if (OB_FAIL(query::ObInnerSQLConnectionAccess::create_connection_with_external_session(
                                 &session, conn_guard))) {
                 } else if (OB_ISNULL(conn = conn_guard.get_ptr())) {
@@ -154,7 +173,7 @@ int check_ai_column_strict_stmt(ObDMLStmt &stmt,
                   ret = OB_ERR_UNEXPECTED;
                 } else if (OB_FAIL(mysql_result->next())) {
                   ret = OB_ERR_UNEXPECTED;
-                } else if (OB_FAIL(mysql_result->get_int(0, unfinished))) {
+                } else if (OB_FAIL(mysql_result->get_int(static_cast<int64_t>(0), unfinished))) {
                 } else if (unfinished > 0) {
                   ret = OB_AI_COLUMN_UNFINISHED_TASK;
                   LOG_USER_ERROR(OB_AI_COLUMN_UNFINISHED_TASK,
@@ -166,6 +185,9 @@ int check_ai_column_strict_stmt(ObDMLStmt &stmt,
                   if (OB_SUCCESS == ret && OB_SUCCESS != close_ret) {
                     ret = close_ret;
                   }
+                }
+                if (!saved_inner) {
+                  query::ObSessionAccess::set_user_session(&session);
                 }
               }
             }

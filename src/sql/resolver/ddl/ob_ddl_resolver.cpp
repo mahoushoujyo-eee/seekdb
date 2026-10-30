@@ -1802,7 +1802,7 @@ static int collect_ai_column_options(ParseNode *node, ObColumnSchemaV2 &column)
     if (pos <= 0 || pos >= static_cast<int32_t>(sizeof(option_buf))) {
       ret = OB_SIZE_OVERFLOW;
     } else {
-      ret = column.add_type_info(ObString(pos, option_buf));
+      ret = column.add_ai_column_info(ObString(pos, option_buf));
     }
   } else if (node->type_ == T_LINK_NODE && node->num_child_ == 2) {
     if (OB_FAIL(collect_ai_column_options(node->children_[0], column))) {
@@ -2027,11 +2027,11 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
         } else if (!is_ai_column) {
           column.add_column_flag(VIRTUAL_GENERATED_COLUMN_FLAG);
         } else {
-          /* Keep the prompt in extended_type_info_ and leave the user column
+          /* Keep AI metadata separate from the result type and leave the user column
            * without a default.  The latter is essential: ordinary INSERT
            * must create a NULL result and an asynchronous task, rather than
            * trying to insert the prompt text into the result column. */
-          if (OB_FAIL(column.add_type_info(expr_str))) {
+          if (OB_FAIL(column.add_ai_column_info(expr_str))) {
           } else {
             if (OB_FAIL(collect_ai_column_options(node->children_[6], column))) {
             }

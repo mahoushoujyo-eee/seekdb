@@ -83,6 +83,7 @@ int ObColumnSchemaV2::assign(const ObColumnSchemaV2 &src_schema)
     } else if (OB_FAIL(deep_copy_str(src_schema.column_name_, column_name_))) {
     } else if (OB_FAIL(deep_copy_str(src_schema.comment_, comment_))) {
     } else if (OB_FAIL(set_extended_type_info(src_schema.extended_type_info_))) {
+    } else if (OB_FAIL(deep_copy_string_array(src_schema.ai_column_info_, ai_column_info_))) {
     } else if (src_schema.column_ref_idxs_ != NULL) {
       if (OB_FAIL(alloc_column_ref_set())) {
       } else if (OB_FAIL(column_ref_idxs_->add_members(*src_schema.column_ref_idxs_))) {
@@ -126,6 +127,10 @@ int64_t ObColumnSchemaV2::get_convert_size() const
   convert_size += extended_type_info_.count() * static_cast<int64_t>(sizeof(ObString));
   for (int64_t i = 0; i < extended_type_info_.count(); ++i) {
     convert_size += extended_type_info_.at(i).length() + 1;
+  }
+  convert_size += ai_column_info_.count() * static_cast<int64_t>(sizeof(ObString));
+  for (int64_t i = 0; i < ai_column_info_.count(); ++i) {
+    convert_size += ai_column_info_.at(i).length() + 1;
   }
   convert_size += local_session_vars_.get_deep_copy_size();
   return convert_size;
@@ -185,6 +190,7 @@ void ObColumnSchemaV2::reset()
   udt_set_id_ = 0;
   sub_type_ = 0;
   reset_string_array(extended_type_info_);
+  reset_string_array(ai_column_info_);
   skip_index_attr_.reset();
   lob_chunk_size_ = OB_DEFAULT_LOB_CHUNK_SIZE;
   local_session_vars_.reset();
@@ -227,7 +233,7 @@ OB_DEF_SERIALIZE(ObColumnSchemaV2)
               next_column_id_);
 
   if (!OB_SUCC(ret)) {
-  } else if (OB_FAIL(serialize_string_array(buf, buf_len, pos, extended_type_info_))) {
+  } else if (OB_FAIL(serialize_extended_type_info(buf, buf_len, pos))) {
   } else {
     LST_DO_CODE(OB_UNIS_ENCODE,
                 srs_id_,
@@ -283,7 +289,7 @@ OB_DEF_DESERIALIZE(ObColumnSchemaV2)
               next_column_id_);
 
   if (!OB_SUCC(ret)) {
-  } else if (OB_FAIL(deserialize_string_array(buf, data_len, pos, extended_type_info_, get_allocator()))) {
+  } else if (OB_FAIL(deserialize_extended_type_info(buf, data_len, pos))) {
   } else if (OB_FAIL(deep_copy_obj(orig_default_value, orig_default_value_))) {
   } else if (OB_FAIL(deep_copy_obj(cur_default_value, cur_default_value_))) {
   } else if (OB_FAIL(deep_copy_str(column_name, column_name_))) {
@@ -334,6 +340,9 @@ OB_DEF_SERIALIZE_SIZE(ObColumnSchemaV2)
               prev_column_id_,
               next_column_id_);
   len += get_string_array_serialize_size(extended_type_info_);
+  if (is_ai_column()) {
+    len += get_string_array_serialize_size(ai_column_info_);
+  }
   LST_DO_CODE(OB_UNIS_ADD_LEN,
               srs_id_,
               udt_set_id_,
@@ -400,6 +409,7 @@ int64_t ObColumnSchemaV2::to_string(char *buf, const int64_t buf_len) const
     K_(comment),
     K_(column_flags),
     K_(extended_type_info),
+    K_(ai_column_info),
     K_(prev_column_id),
     K_(next_column_id),
     K_(encoding_type),
@@ -575,6 +585,7 @@ int ObColumnSchemaV2::serialize_extended_type_info(char *buf, const int64_t buf_
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(serialize_string_array(buf, buf_len, pos, extended_type_info_))) {
+  } else if (is_ai_column() && OB_FAIL(serialize_string_array(buf, buf_len, pos, ai_column_info_))) {
   }
   return ret;
 }
@@ -585,8 +596,30 @@ int ObColumnSchemaV2::deserialize_extended_type_info(const char *buf,
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(deserialize_string_array(buf, data_len, pos, extended_type_info_, get_allocator()))) {
+  } else if (is_ai_column()) {
+    // Read early AI-column schemas which mixed expression/options into the
+    // type array. Keep the canonical VECTOR descriptor as the sole type entry.
+    const int64_t type_count = is_collection() ? 1 : 0;
+    if (extended_type_info_.count() > type_count) {
+      for (int64_t i = type_count; OB_SUCC(ret) && i < extended_type_info_.count(); ++i) {
+        ret = add_ai_column_info(extended_type_info_.at(i));
+      }
+      if (OB_SUCC(ret)) {
+        ObSEArray<ObString, 1> type_info;
+        if (type_count == 1 && OB_FAIL(type_info.push_back(extended_type_info_.at(0)))) {
+        } else if (OB_FAIL(set_extended_type_info(type_info))) {
+        }
+      }
+    } else if (pos < data_len
+               && OB_FAIL(deserialize_string_array(buf, data_len, pos, ai_column_info_, get_allocator()))) {
+    }
   }
   return ret;
+}
+
+int ObColumnSchemaV2::add_ai_column_info(const ObString &info)
+{
+  return add_string_to_array(info, ai_column_info_);
 }
 
 int ObColumnSchemaV2::set_geo_type(const int32_t type_val)

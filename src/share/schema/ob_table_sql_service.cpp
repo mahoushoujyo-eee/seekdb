@@ -1174,7 +1174,7 @@ int ObTableSqlService::add_ai_column_metadata(ObISQLClient &sql_client,
       continue;
     }
     int64_t max_retries = 0;
-    const ObIArray<ObString> &infos = column->get_extended_type_info();
+    const ObIArray<ObString> &infos = column->get_ai_column_info();
     ObString prompt;
     for (int64_t i = 0; i < infos.count(); ++i) {
       const ObString &info = infos.at(i);

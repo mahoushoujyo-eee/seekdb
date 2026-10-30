@@ -30,6 +30,7 @@
 #include "sql/engine/expr/ob_expr_column_conv.h"
 #include "sql/engine/expr/ob_expr_version.h"
 #include "sql/resolver/dml/ob_insert_resolver.h"
+#include "sql/resolver/dml/ob_update_stmt.h"
 #include "sql/resolver/dml/ob_inlist_resolver.h"
 #include "sql/session/ob_local_session_var.h"
 #include "sql/session/ob_basic_session_info.h"
@@ -1867,6 +1868,18 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
     const ObColumnSchemaV2 *col_schema = NULL;
     const ObTableSchema *table_schema = NULL;
     uint64_t tid = table_item.ref_id_;
+    if (!include_hidden && current_scope_ == T_WHERE_SCOPE && stmt->is_update_stmt()) {
+      const uint64_t retry_id = static_cast<ObUpdateStmt *>(stmt)->get_ai_retry_column_id();
+      if (retry_id != OB_INVALID_ID) {
+        // RETRY's STATUS expression refers only to this AI column's state.
+        // Keep this permission local to the retry UPDATE predicate.
+        char state_name[64];
+        const int len = snprintf(state_name, sizeof(state_name), "__ai_%lu_state",
+                                  static_cast<unsigned long>(retry_id));
+        include_hidden = len > 0 && len < static_cast<int>(sizeof(state_name))
+            && ObCharset::case_insensitive_equal(column_name, ObString(len, state_name));
+      }
+    }
     if (!include_hidden) {
       if (!ObCharset::case_insensitive_equal(column_name, OB_HIDDEN_PK_INCREMENT_COLUMN_NAME)) {
         //do nothing

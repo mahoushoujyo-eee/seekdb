@@ -25,7 +25,8 @@ using namespace oceanbase::common;
 
 ObUpdateStmt::ObUpdateStmt()
   : ObDelUpdStmt(stmt::T_UPDATE),
-    table_info_()
+    table_info_(),
+    ai_retry_column_id_(OB_INVALID_ID)
 {
 }
 
@@ -48,7 +49,9 @@ int ObUpdateStmt::deep_copy_stmt_struct(ObIAllocator &allocator,
                                                                expr_copier,
                                                                other.table_info_,
                                                                table_info_))) {
-  } else { /*do nothing*/ }
+  } else {
+    ai_retry_column_id_ = other.ai_retry_column_id_;
+  }
 
   return ret;
 }
@@ -58,7 +61,9 @@ int ObUpdateStmt::assign(const ObUpdateStmt &other)
   int ret = OB_SUCCESS;
   if (OB_FAIL(ObDelUpdStmt::assign(other))) {
   } else if (OB_FAIL(table_info_.assign(other.table_info_))) {
-  } else { /*do nothing*/ }
+  } else {
+    ai_retry_column_id_ = other.ai_retry_column_id_;
+  }
   return ret;
 }
 

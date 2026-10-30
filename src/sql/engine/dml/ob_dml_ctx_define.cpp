@@ -425,6 +425,7 @@ OB_DEF_SERIALIZE(ObUpdCtDef)
   OZ(ObDASUtils::serialize_das_ctdefs(buf, buf_len, pos, related_upd_ctdefs_));
   OZ(ObDASUtils::serialize_das_ctdefs(buf, buf_len, pos, related_del_ctdefs_));
   OZ(ObDASUtils::serialize_das_ctdefs(buf, buf_len, pos, related_ins_ctdefs_));
+  OB_UNIS_ENCODE(ai_retry_column_id_);
   return ret;
 }
 
@@ -481,6 +482,7 @@ OB_DEF_DESERIALIZE(ObUpdCtDef)
   OZ(ObDASUtils::deserialize_das_ctdefs(buf, data_len, pos,
                                         alloc_, DAS_OP_TABLE_INSERT,
                                         related_ins_ctdefs_));
+  OB_UNIS_DECODE(ai_retry_column_id_);
   return ret;
 }
 
@@ -514,6 +516,7 @@ OB_DEF_SERIALIZE_SIZE(ObUpdCtDef)
   len += ObDASUtils::das_ctdefs_serialize_size(related_upd_ctdefs_);
   len += ObDASUtils::das_ctdefs_serialize_size(related_del_ctdefs_);
   len += ObDASUtils::das_ctdefs_serialize_size(related_ins_ctdefs_);
+  OB_UNIS_ADD_LEN(ai_retry_column_id_);
   return len;
 }
 

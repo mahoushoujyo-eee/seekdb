@@ -66,6 +66,8 @@ public:
   virtual int get_view_check_exprs(ObIArray<ObRawExpr*>& view_check_exprs) const override;
   virtual int remove_table_item_dml_info(const TableItem* table) override;
   int remove_invalid_assignment();
+  uint64_t get_ai_retry_column_id() const { return ai_retry_column_id_; }
+  void set_ai_retry_column_id(uint64_t id) { ai_retry_column_id_ = id; }
 
   TO_STRING_KV(N_STMT_TYPE, stmt_type_,
       N_TABLE, table_items_,
@@ -82,6 +84,7 @@ public:
 
 private:
   common::ObSEArray<ObUpdateTableInfo*, 2, common::ModulePageAllocator, true> table_info_;
+  uint64_t ai_retry_column_id_;
 };
 } //namespace sql
 }//namespace oceanbase

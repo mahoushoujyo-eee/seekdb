@@ -578,6 +578,7 @@ public:
       need_check_table_cycle_(false),
       distinct_algo_(T_DISTINCT_NONE),
       assign_columns_(alloc),
+      ai_retry_column_id_(OB_INVALID_ID),
       ddel_ctdef_(nullptr),
       dins_ctdef_(nullptr),
       dlock_ctdef_(nullptr),
@@ -609,6 +610,7 @@ public:
   bool need_check_table_cycle_;
   DistinctType distinct_algo_;
   ColContentFixedArray assign_columns_;
+  uint64_t ai_retry_column_id_;
   //if update target column involve the partition key,
   //the update operation may be split into delete and insert
   ObDASDelCtDef *ddel_ctdef_;

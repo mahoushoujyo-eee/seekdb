@@ -22,6 +22,7 @@
 #include "sql/optimizer/ob_log_for_update.h"
 #include "sql/optimizer/ob_log_insert.h"
 #include "sql/optimizer/ob_log_update.h"
+#include "sql/resolver/dml/ob_update_stmt.h"
 #include "sql/das/ob_domain_id.h"
 #include "query/vector/ob_vector_index_util.h"
 
@@ -358,6 +359,10 @@ int ObDmlCgService::generate_update_ctdef(ObLogDelUpd &op,
   } else {
     upd_ctdef.need_check_filter_null_ = index_dml_info.need_filter_null_;
     upd_ctdef.distinct_algo_ = index_dml_info.distinct_algo_;
+    if (OB_NOT_NULL(op.get_stmt()) && op.get_stmt()->is_update_stmt()) {
+      upd_ctdef.ai_retry_column_id_ =
+          static_cast<const ObUpdateStmt *>(op.get_stmt())->get_ai_retry_column_id();
+    }
   }
 
   // create table t1 (c1 int primary key, c2 int, c3 int) partition by hash(c1) partitions 4;

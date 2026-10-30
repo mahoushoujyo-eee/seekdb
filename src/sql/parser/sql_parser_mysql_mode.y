@@ -339,7 +339,7 @@ END_P SET_VAR DELIMITER
         QUANTIFIER_TABLE QUARTER QUERY QUEUE_TIME QUICK
 
         RECOVER REDUNDANT REFRESH RELAY RELAYLOG RELAY_LOG_FILE RELAY_LOG_POS RELAY_THREAD RELOAD REMOVE
-        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
+        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETRY RETURNED_SQLSTATE RETURNS RETURNING REVERSE
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
         RANK READ_ONLY RECOVERY REJECT ROLE
@@ -14798,8 +14798,40 @@ alter_with_opt_hint TABLE relation_factor alter_table_actions
 {
   ParseNode *table_actions = NULL;
   merge_nodes(table_actions, result, T_ALTER_TABLE_ACTION_LIST, $4);
-  malloc_non_terminal_node($$, result->malloc_pool_, T_ALTER_TABLE, 4, $3, table_actions, NULL, $1);
-  $$->value_ = 0;
+  ParseNode *retry_action = NULL;
+  for (int i = 0; table_actions != NULL && i < table_actions->num_child_; ++i) {
+    if (table_actions->children_[i]->type_ == T_AI_COLUMN_RETRY) {
+      retry_action = table_actions->children_[i];
+      break;
+    }
+  }
+  if (retry_action == NULL) {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_ALTER_TABLE, 4, $3, table_actions, NULL, $1);
+    $$->value_ = 0;
+  } else {
+    // RETRY is row DML: lower to the native UPDATE plan so invalidation and
+    // durable task creation participate in the same transaction and indexes.
+    retry_action->value_ = table_actions->num_child_;
+    ParseNode *table_node = NULL;
+    ParseNode *tables = NULL;
+    ParseNode *column = NULL;
+    ParseNode *null_value = NULL;
+    ParseNode *assignment = NULL;
+    ParseNode *assignments = NULL;
+    malloc_non_terminal_node(table_node, result->malloc_pool_, T_ORG, 4, $3, NULL, NULL, NULL);
+    malloc_non_terminal_node(tables, result->malloc_pool_, T_TABLE_REFERENCES, 1, table_node);
+    malloc_non_terminal_node(column, result->malloc_pool_, T_COLUMN_REF, 3,
+                             NULL, NULL, retry_action->children_[0]);
+    dup_node_string(retry_action->children_[0], column, result->malloc_pool_);
+    malloc_terminal_node(null_value, result->malloc_pool_, T_NULL);
+    malloc_non_terminal_node(assignment, result->malloc_pool_, T_ASSIGN_ITEM, 2, column, null_value);
+    malloc_non_terminal_node(assignments, result->malloc_pool_, T_ASSIGN_LIST, 1, assignment);
+    malloc_non_terminal_node($$, result->malloc_pool_, T_UPDATE, 11,
+                             NULL, tables, assignments, retry_action->children_[1],
+                             NULL, NULL, NULL, $1, NULL, NULL, retry_action);
+    $$->value_ = table_actions->num_child_ == 1 ? 1 : 2;
+    $$->is_tree_not_param_ = 1;
+  }
 }
 ;
 
@@ -14837,6 +14869,10 @@ opt_set table_option_list_space_seperated
 {
   (void)$1;
   merge_nodes($$, result, T_TABLE_OPTION_LIST, $2);
+}
+| RETRY AI COLUMN column_name opt_where
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_RETRY, 2, $4, $5);
 }
 | CONVERT TO CHARACTER SET charset_name opt_collation
 {
@@ -18185,6 +18221,7 @@ ACCOUNT
 |       RESTART
 |       RESTORE
 |       RESUME
+|       RETRY
 |       RETURNED_SQLSTATE
 |       RETURNING
 |       RETURNS
