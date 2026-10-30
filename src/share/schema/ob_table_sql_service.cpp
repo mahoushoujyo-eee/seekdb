@@ -3288,7 +3288,10 @@ int ObTableSqlService::gen_column_dml_without_check(
       cur_default_value.reset();
     }
     ObString bin_extended_type_info;
-    if (OB_SUCC(ret) && (column.is_enum_or_set() || column.is_collection())) {
+    // AI expressions and VECTOR dimensions are stored in extended_type_info too.
+    // Persist them alongside enum/collection metadata so a schema reload does
+    // not lose the dependency expression or vector shape.
+    if (OB_SUCC(ret) && (column.is_enum_or_set() || column.is_collection() || column.is_ai_column())) {
       int64_t pos = 0;
       extended_type_info_buf = static_cast<char *>(allocator.alloc(OB_MAX_VARBINARY_LENGTH));
       if (OB_ISNULL(extended_type_info_buf)) {
