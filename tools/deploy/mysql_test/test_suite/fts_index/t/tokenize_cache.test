@@ -19,7 +19,9 @@ select id, json_contains(
   tokenize(body, parser, properties),
   case when parser = 'ngram' then tokenize(body, 'ngram')
        when id = 5 then tokenize(body, 'space', '[{"output":"all"}]')
-       else tokenize(body, 'space') end) as correct
+       else tokenize(body, 'space') end) as correct,
+  case when id = 3 then json_length(tokenize(body, parser, properties)) = 0
+       else true end as empty_ok
   from texts order by id;
 --echo # Empty inputs and stopwords remain valid
 select json_length(tokenize('', 'beng')) as empty_tokens,

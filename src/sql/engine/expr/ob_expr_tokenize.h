@@ -55,13 +55,16 @@ public:
   {
   public:
     TokenizeCtx() : ObExprOperatorCtx(), helper_(), param_allocator_("TokenizeCtx"),
-                    parser_name_(), properties_(), inited_(false) {}
+                    parser_name_(), properties_(), token_map_(), inited_(false) {}
     ~TokenizeCtx() override { helper_.reset(); }
 
     storage::ObFTParseHelper helper_;
     common::ObArenaAllocator param_allocator_;
     common::ObString parser_name_;
     common::ObString properties_;
+    // Buckets belong to this execution context; token strings still belong to
+    // the current evaluation's temporary allocator.
+    storage::ObFTWordMap token_map_;
     bool inited_;
   };
 
@@ -112,8 +115,7 @@ private:
 
   static int tokenize_fulltext(const TokenizeParam &param,
                                TokenizeParam::OUTPUT_MODE mode,
-                               common::ObIAllocator &allocator,
-                               storage::ObFTParseHelper *cached_helper,
+                               TokenizeCtx &tokenize_ctx,
                                ObIJsonBase *&result);
 
   static int construct_ft_parser_inner_name(const ObString &input_str, TokenizeParam &param);

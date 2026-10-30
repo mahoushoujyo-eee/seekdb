@@ -1,11 +1,11 @@
 # Dynamic parser cache agrees with isolated literal parser calls
-id	correct
-1	1
-2	1
-3	1
-4	1
-5	1
-6	1
+id	correct	empty_ok
+1	1	1
+2	1	1
+3	1	1
+4	1	1
+5	1	1
+6	1	1
 # Empty inputs and stopwords remain valid
 empty_tokens	stopword_tokens
 0	1
