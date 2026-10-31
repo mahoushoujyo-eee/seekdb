@@ -48,6 +48,7 @@ ObFTIndexRowCache::ObFTIndexRowCache()
     row_idx_(0),
     is_fts_index_aux_(true),
     helper_(),
+    word_map_(),
     is_inited_(false)
 {
 }
@@ -94,7 +95,8 @@ int ObFTIndexRowCache::segment(const common::ObObjMeta &ft_obj_meta,
                                                                    doc_id_datum,
                                                                    fulltext,
                                                                    is_fts_index_aux_,
-                                                                   rows_))) {
+                                                                   rows_,
+                                                                   &word_map_))) {
   } else {
     row_idx_ = 0;
   }
@@ -120,6 +122,9 @@ int ObFTIndexRowCache::get_next_row(blocksstable::ObDatumRow *&row)
 void ObFTIndexRowCache::reset()
 {
   rows_.reset();
+  if (word_map_.created()) {
+    (void)word_map_.destroy();
+  }
   row_idx_ = 0;
   is_fts_index_aux_ = true;
   helper_.reset();
@@ -280,37 +285,63 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
                                                              const ObDatum &doc_id_datum,
                                                              const ObString &fulltext,
                                                              const bool is_fts_index_aux,
-                                                             ObDomainIndexRow &word_rows)
+                                                             ObDomainIndexRow &word_rows,
+                                                             storage::ObFTWordMap *reusable_word_map)
 {
   int ret = OB_SUCCESS;
   static int64_t FT_WORD_DOC_COL_CNT = 4;
   static constexpr int64_t FT_MAX_WORD_BUCKET = 997;
+  static constexpr int64_t FT_WORD_MAP_NODE_RESERVE = 128;
   const int64_t ft_word_bkt_cnt = MIN(MAX(fulltext.length() / 10, 2), FT_MAX_WORD_BUCKET);
   int64_t doc_length = 0;
-  ObFTWordMap ft_word_map;
+  ObFTWordMap local_word_map;
+  ObFTWordMap *ft_word_map = OB_NOT_NULL(reusable_word_map) ? reusable_word_map : &local_word_map;
   void *rows_buf = nullptr;
   blocksstable::ObDatumRow *rows = nullptr;
   if (OB_ISNULL(helper) || OB_UNLIKELY(!ft_obj_meta.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (0 == fulltext.length()) {
+  }
+
+  if (OB_SUCC(ret) && OB_NOT_NULL(reusable_word_map) && 0 == fulltext.length()) {
+    if (ft_word_map->created() && OB_FAIL(ft_word_map->reuse())) {
+    }
+  } else if (OB_SUCC(ret) && OB_NOT_NULL(reusable_word_map)) {
+    bool created_for_call = false;
+    if (!ft_word_map->created()) {
+      if (OB_FAIL(ft_word_map->create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
+      } else {
+        created_for_call = true;
+      }
+    }
+    if (OB_SUCC(ret) && created_for_call) {
+      if (OB_FAIL(ft_word_map->get_local_allocer().reserve(FT_WORD_MAP_NODE_RESERVE))) {
+        const int reserve_ret = ret;
+        (void)ft_word_map->destroy();
+        ret = reserve_ret;
+      }
+    }
+  }
+
+  if (OB_SUCC(ret) && 0 == fulltext.length()) {
     ret = OB_ITER_END;
-  } else if (OB_FAIL(ft_word_map.create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
-  } else if (OB_FAIL(segment_and_calc_word_count(allocator,
+  } else if (OB_SUCC(ret) && OB_ISNULL(reusable_word_map)
+             && OB_FAIL(ft_word_map->create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
+  } else if (OB_SUCC(ret) && OB_FAIL(segment_and_calc_word_count(allocator,
                                                  helper,
                                                  ft_obj_meta,
                                                  fulltext,
                                                  doc_length,
-                                                 ft_word_map))) {
-  } else if (0 == ft_word_map.size()) {
+                                                 *ft_word_map))) {
+  } else if (OB_SUCC(ret) && 0 == ft_word_map->size()) {
     ret = OB_ITER_END;
-  } else if (OB_ISNULL(rows_buf = reinterpret_cast<char *>(
-                           allocator.alloc(ft_word_map.size() * sizeof(blocksstable::ObDatumRow))))) {
+  } else if (OB_SUCC(ret) && OB_ISNULL(rows_buf = reinterpret_cast<char *>(
+                           allocator.alloc(ft_word_map->size() * sizeof(blocksstable::ObDatumRow))))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else {
+  } else if (OB_SUCC(ret)) {
     int64_t i = 0;
-    rows = new (rows_buf) blocksstable::ObDatumRow[ft_word_map.size()];
-    for (ObFTWordMap::const_iterator iter = ft_word_map.begin();
-         OB_SUCC(ret) && iter != ft_word_map.end();
+    rows = new (rows_buf) blocksstable::ObDatumRow[ft_word_map->size()];
+    for (ObFTWordMap::const_iterator iter = ft_word_map->begin();
+         OB_SUCC(ret) && iter != ft_word_map->end();
          ++iter) {
       if (OB_FAIL(rows[i].init(allocator, FT_WORD_DOC_COL_CNT))) {
       } else {
@@ -332,6 +363,12 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
           ++i;
         }
       }
+    }
+  }
+  if (OB_NOT_NULL(reusable_word_map) == false && local_word_map.created()) {
+    const int cleanup_ret = local_word_map.destroy();
+    if (OB_SUCC(ret) && OB_SUCCESS != cleanup_ret) {
+      ret = cleanup_ret;
     }
   }
   return ret;
@@ -844,12 +881,18 @@ void ObFTDMLIterator::reset()
   is_inited_ = false;
   data_plane::reset_ft_doc_word_iterator(ft_doc_word_iter_);
   ft_parse_helper_.reset();
+  if (ft_word_map_.created()) {
+    ft_word_map_.reuse();
+  }
   ObDomainDMLIterator::reset();
 }
 
 ObFTDMLIterator::~ObFTDMLIterator()
 {
   data_plane::destroy_ft_doc_word_iterator(ft_doc_word_iter_);
+  if (ft_word_map_.created()) {
+    (void)ft_word_map_.destroy();
+  }
 }
 
 int ObFTDMLIterator::rewind()
@@ -1033,7 +1076,8 @@ int ObFTDMLIterator::generate_ft_word_rows(const ObChunkDatumStore::StoredRow *s
                                                                    doc_id_datum,
                                                                    ft,
                                                                    is_fts_index_aux,
-                                                                   rows_))) {
+                                                                   rows_,
+                                                                   &ft_word_map_))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
     }
   }

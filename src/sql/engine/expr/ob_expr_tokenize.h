@@ -56,7 +56,13 @@ public:
   public:
     TokenizeCtx() : ObExprOperatorCtx(), helper_(), param_allocator_("TokenizeCtx"),
                     parser_name_(), properties_(), token_map_(), inited_(false) {}
-    ~TokenizeCtx() override { helper_.reset(); }
+    ~TokenizeCtx() override
+    {
+      helper_.reset();
+      if (token_map_.created()) {
+        (void)token_map_.destroy();
+      }
+    }
 
     storage::ObFTParseHelper helper_;
     common::ObArenaAllocator param_allocator_;

@@ -51,7 +51,21 @@ private:
   ObObjMeta meta_;
 };
 
-typedef common::hash::ObHashMap<ObFTWord, int64_t> ObFTWordMap;
+// Word maps are confined to one parser/iterator invocation and are never shared.
+typedef common::hash::HashMapTypes<ObFTWord, int64_t>::AllocType ObFTWordMapNode;
+typedef common::hash::SimpleAllocer<
+    ObFTWordMapNode,
+    common::hash::NodeNumTraits<ObFTWordMapNode>::NODE_NUM,
+    common::hash::NoPthreadDefendMode> ObFTWordMapAllocer;
+typedef common::hash::ObHashMap<ObFTWord,
+                                int64_t,
+                                common::hash::NoPthreadDefendMode,
+                                common::hash::hash_func<ObFTWord>,
+                                common::hash::equal_to<ObFTWord>,
+                                ObFTWordMapAllocer,
+                                common::hash::NormalPointer,
+                                common::ObMalloc,
+                                2> ObFTWordMap;
 
 class ObAddWordFlag final
 {
