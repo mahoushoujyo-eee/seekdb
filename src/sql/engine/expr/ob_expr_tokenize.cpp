@@ -125,6 +125,8 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
 
   if (TokenizeParam::OUTPUT_MODE::DEFAULT != mode && TokenizeParam::OUTPUT_MODE::ALL != mode) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (token_map.created() && token_map.bucket_count() != ft_word_bkt_cnt
+             && OB_FAIL(token_map.destroy())) {
   } else if (!token_map.created()
              && OB_FAIL(token_map.create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
   }

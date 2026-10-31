@@ -64,8 +64,7 @@ typedef common::hash::ObHashMap<ObFTWord,
                                 common::hash::equal_to<ObFTWord>,
                                 ObFTWordMapAllocer,
                                 common::hash::NormalPointer,
-                                common::ObMalloc,
-                                2> ObFTWordMap;
+                                common::ObMalloc> ObFTWordMap;
 
 class ObAddWordFlag final
 {
