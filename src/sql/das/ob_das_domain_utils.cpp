@@ -293,6 +293,7 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
   static constexpr int64_t FT_MAX_WORD_BUCKET = 997;
   static constexpr int64_t FT_WORD_MAP_NODE_RESERVE = 128;
   const int64_t ft_word_bkt_cnt = MIN(MAX(fulltext.length() / 10, 2), FT_MAX_WORD_BUCKET);
+  const int64_t ft_word_hash_bucket_cnt = common::hash::cal_next_prime(ft_word_bkt_cnt);
   int64_t doc_length = 0;
   ObFTWordMap local_word_map;
   ObFTWordMap *ft_word_map = OB_NOT_NULL(reusable_word_map) ? reusable_word_map : &local_word_map;
@@ -307,7 +308,10 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
     }
   } else if (OB_SUCC(ret) && OB_NOT_NULL(reusable_word_map)) {
     bool created_for_call = false;
-    if (!ft_word_map->created()) {
+    if (ft_word_map->created() && ft_word_map->bucket_count() != ft_word_hash_bucket_cnt
+        && OB_FAIL(ft_word_map->destroy())) {
+    }
+    if (OB_SUCC(ret) && !ft_word_map->created()) {
       if (OB_FAIL(ft_word_map->create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
       } else {
         created_for_call = true;
