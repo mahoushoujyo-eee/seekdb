@@ -308,7 +308,7 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
     }
   } else if (OB_SUCC(ret) && OB_NOT_NULL(reusable_word_map)) {
     bool created_for_call = false;
-    if (ft_word_map->created() && ft_word_map->bucket_count() < ft_word_hash_bucket_cnt
+    if (ft_word_map->created() && ft_word_map->bucket_count() != ft_word_hash_bucket_cnt
         && OB_FAIL(ft_word_map->destroy())) {
     }
     if (OB_SUCC(ret) && !ft_word_map->created()) {
